@@ -146,6 +146,16 @@ These settings default to the upstream behaviour (see [README](../README.md)):
     evenly. `manifest.json` gets a `frames` entry (`file`, `count`, `extracted`,
     `limit`, `thinned`, or `error` when extraction failed, which does not discard
     the other media). `frames.zip` and `manifest.json` are not uploaded by this step.
+-   `RECORDING_STATE_CALLBACK=1` posts every start and stop to `${recordingAddress}/state`
+    with the JSON body `{recording_id, active, started, reason, user_id}`. `recording_id`
+    is the name of the recording folder (`${Date.now()}-${channelUUID}`), chosen before
+    disk space is reserved, so a failed start also posts `active: false` with
+    `started: false`. `reason` is `user` (`setRecording`), `alone` (one participant
+    left, or the channel closed), `max_duration` or `error`; `user_id` is the user who
+    requested the start or the stop, `null` otherwise. The calls of a channel are sent
+    one at a time, in order. A network failure, a 5xx or a 429 is retried after 2, 10
+    and 30 s, then every minute, for at least 30 minutes; any other answer (409 for a
+    late start included) is final. The calls never block the recording.
 
 ## scheduler service and post-processing
 
@@ -186,6 +196,27 @@ successful upload before posting `start_ms` and `end_ms` to
 so the completion token has not expired during a long upload. Odoo announces
 availability only after completion. Transcription, routing, upload and completion
 failures discard the recording without retrying any request.
+
+With `RECORDING_ARCHIVE=1` the recording is delivered as one `recording.zip`
+(stored, not compressed) with `mimetype=application/zip`: `mix.ogg`, `transcript.txt`
+and `transcript.json` when the transcription step left them in the recording folder,
+`frames.zip`, the compiled `video.<ext>` when `RECORDING_COMPILE_VIDEO` is on, and
+`manifest.json`. A track that cannot be read, a mix or a video that cannot be compiled
+is reported in `manifest.json` (`tracks[].error`, `mix.error`, `video.error`) and the
+rest is still delivered. Routing and completion carry `recording_id` (the folder
+name) first in the query, and every JWT to Odoo, `state` included, carries
+`aud: "24print-call-recording"`, `recording_id` and `exp - iat = 600` (24print-ua/24print-hub#227).
+
+With `RECORDING_DELIVERY_RETRY=1` a delivery that fails on the network, with a 5xx or
+a 429 keeps the recording queued: `metadata.bin.processing` goes back to
+`metadata.bin` and `delivery.json` in the folder records the failed attempts and the
+time of the next one (1, 5, 15, 30, 60 minutes, then hourly; the scheduler checks every
+2 minutes). Other recordings are processed meanwhile. Every attempt starts again with
+routing, so Odoo issues a new upload token. The retries survive a restart; a folder
+left as `metadata.bin.processing` without a delivered `delivery.json` (process stopped
+during an attempt) is delivered again. A 401, 403, 404, a response without
+`destination` or any other failure discards the recording as before, and the 24 h
+`fileTTL` deletes a recording still undelivered.
 
 Deploy the Odoo routing and completion changes together with this uploader.
 Older Odoo routes may reject POST through CSRF protection. Updated Odoo routes

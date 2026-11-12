@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { crc32 } from "node:zlib";
+import { createHmac } from "node:crypto";
 
 import { afterAll, beforeAll, describe, expect, jest, test } from "@jest/globals";
 
@@ -316,4 +317,164 @@ describe("R9 of D005: audio mix", () => {
             }
         }
     );
+});
+
+describe("R16, R18 of D005: delivery archive", () => {
+    const routingAddress = "http://odoo.test/discuss/recording/5";
+    const destination = "http://odoo.test/discuss/recording/upload/token";
+
+    function claimsOf(authorization: string, key: Buffer) {
+        const [header, claims, signature] = authorization.replace(/^Bearer /, "").split(".");
+        expect(createHmac("sha256", key).update(`${header}.${claims}`).digest("base64url")).toBe(
+            signature
+        );
+        return JSON.parse(Buffer.from(claims, "base64url").toString());
+    }
+
+    test("R16, R18 of D005: a damaged track leaves the others in recording.zip, its failure in manifest.json", async () => {
+        const restore = withMockEnv({
+            DATA_PATH: path.join(root, "archive"),
+            RECORDING_ARCHIVE: "1",
+            RECORDING_SCREEN_FRAMES: "1",
+            RECORDING_COMPILE_VIDEO: "false"
+        });
+        const originalFetch = global.fetch;
+        try {
+            const config = await import("#src/config.ts");
+            const auth = await import("#src/core/services/auth.ts");
+            const { RecordingProcessor } = await import(
+                "#src/recording/models/recording_processor.ts"
+            );
+            const { MediaUploader } = await import("#src/recording/models/media_uploader.ts");
+            auth.start();
+            const key = Buffer.from("channel-key-of-odoo");
+            const folderName = `${START}-0e0d4b7c-5a4e-4d6e-9a43-5b8f6f0d2a11`;
+            const dir = path.join(config.dir.recordings, folderName);
+            await mkdir(path.join(dir, STREAM_TYPE.AUDIO), { recursive: true });
+            await mkdir(path.join(dir, STREAM_TYPE.SCREEN), { recursive: true });
+            await ffmpeg([
+                ...["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3"],
+                ...["-c:a", "libopus", path.join(dir, "audio", "1-1-audio.webm")]
+            ]);
+            await writeFile(path.join(dir, "audio", "1-2-audio.webm"), "not audio");
+            await ffmpeg([
+                ...["-f", "lavfi", "-i", "testsrc=size=320x240:rate=5:duration=3"],
+                ...["-c:v", "libvpx", "-deadline", "realtime"],
+                path.join(dir, "screen", "1-1-screen.mkv")
+            ]);
+            // what the transcription step (24print-hub#232) leaves in the folder
+            await writeFile(path.join(dir, "transcript.txt"), "[00:01] Ann: hello\n");
+            await writeFile(path.join(dir, "transcript.json"), "[]");
+            const now = Date.now();
+            const audioTrack = (filename: string, sessionId: number) => ({
+                tag: TIME_TAG.FILE_STATE_CHANGE,
+                timestamp: now - 3_000,
+                info: {
+                    type: STREAM_TYPE.AUDIO,
+                    filename,
+                    sessionId,
+                    active: true,
+                    available: true
+                }
+            });
+            await writeFile(
+                path.join(dir, config.recording.metadataFileName),
+                auth.encrypt(
+                    JSON.stringify({
+                        channelName: "test",
+                        channelUUID: "uuid",
+                        routingAddress,
+                        channelKey: key.toString("base64"),
+                        userId: 7,
+                        audio: true,
+                        video: true,
+                        transcription: false,
+                        startedAt: now - 3_000,
+                        stoppedAt: now,
+                        timeStamps: [
+                            audioTrack("1-1-audio.webm", 1),
+                            audioTrack("1-2-audio.webm", 2),
+                            fileState(STREAM_TYPE.SCREEN, "1-1-screen.mkv", now - 3_000)
+                        ]
+                    })
+                )
+            );
+            const requests: { url: string; init: RequestInit }[] = [];
+            const uploaded = path.join(root, "uploaded.zip");
+            global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+                const url = input.toString();
+                requests.push({ url, init: init! });
+                if (url === destination) {
+                    const chunks: Buffer[] = [];
+                    for await (const chunk of init!.body as unknown as AsyncIterable<Buffer>) {
+                        chunks.push(chunk);
+                    }
+                    await writeFile(uploaded, Buffer.concat(chunks));
+                    return Response.json({ ok: true });
+                }
+                if (url.includes("/routing?")) {
+                    return Response.json({
+                        destination,
+                        method: "POST",
+                        requires_completion: true
+                    });
+                }
+                return Response.json({ ok: true });
+            }) as typeof fetch;
+            const processor = new RecordingProcessor({
+                uploader: new MediaUploader({ routingTimeoutMs: 30_000, uploadTimeoutMs: 30_000 }),
+                finalizeRecordingFolder: (recordingDir) => rm(recordingDir, { recursive: true })
+            });
+
+            expect(await processor.process(folderName)).toBe(true);
+
+            const range = `start_ms=${now - 3_000}&end_ms=${now}`;
+            expect(requests.map(({ url }) => url)).toEqual([
+                `${routingAddress}/routing?recording_id=${folderName}&${range}&mimetype=application%2Fzip`,
+                destination,
+                `${routingAddress}/complete?recording_id=${folderName}&${range}`
+            ]);
+            expect((requests[1].init.headers as Record<string, string>)["Content-Type"]).toBe(
+                "application/zip"
+            );
+            for (const { init } of [requests[0], requests[2]]) {
+                const claims = claimsOf(
+                    (init.headers as Record<string, string>).Authorization,
+                    key
+                );
+                expect(claims).toMatchObject({
+                    aud: "24print-call-recording",
+                    recording_id: folderName,
+                    user_id: 7
+                });
+                expect(claims.exp - claims.iat).toBeLessThanOrEqual(600);
+            }
+
+            const archive = await readZip(uploaded);
+            expect([...archive.keys()]).toEqual([
+                "mix.ogg",
+                "transcript.txt",
+                "transcript.json",
+                "frames.zip",
+                "manifest.json"
+            ]);
+            const mix = path.join(root, "mix.ogg");
+            await writeFile(mix, archive.get("mix.ogg")!);
+            const { stdout } = await run("ffprobe", [
+                ...["-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0", mix]
+            ]);
+            expect(stdout.trim()).toBe("opus");
+            const manifest = JSON.parse(archive.get("manifest.json")!.toString());
+            expect(manifest.tracks).toEqual([
+                { file: "audio/1-1-audio.webm", session_id: 1 },
+                { file: "audio/1-2-audio.webm", session_id: 2, error: "unreadable" }
+            ]);
+            expect(manifest.mix).toEqual({ file: "mix.ogg" });
+            expect(manifest.frames.count).toBeGreaterThan(0);
+            await expect(stat(dir)).rejects.toThrow();
+        } finally {
+            global.fetch = originalFetch;
+            restore();
+        }
+    });
 });

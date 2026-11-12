@@ -177,6 +177,8 @@ export class MediaCompiler {
     private readonly _stoppedAt: number;
     private readonly _timeStamps: TimeStampData[];
     private readonly _signal = AbortSignal.timeout(COMPILATION_TIMEOUT);
+    /** raw files skipped as unreadable, full paths */
+    readonly unreadableFiles = new Set<string>();
     private _audioPromise?: Promise<string | undefined>;
     private _videoPromise?: Promise<string | undefined>;
     private async _concatenateSegments({
@@ -257,6 +259,7 @@ export class MediaCompiler {
             const filePath = path.join(this._workingDir, "audio", filename);
             if (!(await validateMediaFile(filePath, "a:0", this._signal))) {
                 logger.warn(`Skipping corrupted audio file: ${filePath}`);
+                this.unreadableFiles.add(filePath);
                 continue;
             }
             relevantFiles.push({
@@ -441,6 +444,7 @@ export class MediaCompiler {
                 validPaths.add(filePath);
             } else {
                 logger.warn(`Skipping corrupted video file: ${filePath}`);
+                this.unreadableFiles.add(filePath);
             }
         }
         return validPaths;

@@ -16,6 +16,60 @@ type RoutingResponse = {
 
 const logger = new Logger("MEDIA_UPLOADER");
 const MAX_ROUTING_RESPONSE_BYTES = 64 * 1024;
+/** `aud` of the JWT of the 24print recording contract (24print-ua/24print-hub#227) */
+export const RECORDING_AUDIENCE = "24print-call-recording";
+const RECORDING_TOKEN_LIFETIME = 600; // seconds, exp - iat
+
+/**
+ * A response with an unexpected HTTP status.
+ */
+export class HttpError extends Error {
+    readonly status: number;
+
+    constructor(message: string, status: number) {
+        super(message);
+        this.status = status;
+    }
+}
+
+/**
+ * Whether a request may succeed when repeated: a network failure or timeout, a 5xx or a 429.
+ * Other statuses (401, 403, 404, 409...) and malformed responses are final.
+ */
+export function isRetryable(error: unknown): boolean {
+    if (error instanceof HttpError) {
+        return error.status >= 500 || error.status === 429;
+    }
+    return (
+        error instanceof TypeError ||
+        (error instanceof DOMException &&
+            (error.name === "TimeoutError" || error.name === "AbortError"))
+    );
+}
+
+/**
+ * Signs a request of the 24print recording contract to Odoo: `aud`, `recording_id`
+ * and a lifetime of 10 minutes, so a call-join token signed with the same key is refused.
+ *
+ * @param key - base64 channel key
+ */
+export function signRecordingToken(
+    key: string | undefined,
+    recordingId: string,
+    claims: Record<string, unknown> = {}
+): string {
+    const iat = Math.floor(Date.now() / 1000);
+    return sign(
+        {
+            ...claims,
+            aud: RECORDING_AUDIENCE,
+            recording_id: recordingId,
+            iat,
+            exp: iat + RECORDING_TOKEN_LIFETIME
+        },
+        key
+    );
+}
 
 export class MediaUploader {
     private readonly _routingTimeoutMs: number;
@@ -78,14 +132,18 @@ export class MediaUploader {
     async uploadMedia({
         filePath,
         metadata,
-        mimetype
+        mimetype,
+        recordingId
     }: {
         filePath: string;
         metadata: SealedMetaData;
         mimetype: string;
+        /** sent as `recording_id` and signed in the JWT (24print contract) when set */
+        recordingId?: string;
     }) {
         logger.info(`Uploading ${filePath} to ${metadata.routingAddress}`);
         const params = new URLSearchParams({
+            ...(recordingId === undefined ? {} : { recording_id: recordingId }),
             start_ms: String(metadata.startedAt),
             end_ms: String(metadata.stoppedAt),
             mimetype
@@ -95,7 +153,7 @@ export class MediaUploader {
             {
                 method: "POST",
                 headers: {
-                    Authorization: `Bearer ${this._makeJwt(metadata)}`
+                    Authorization: `Bearer ${this._makeJwt(metadata, recordingId)}`
                 }
             },
             this._routingTimeoutMs
@@ -137,7 +195,7 @@ export class MediaUploader {
                 {
                     method: "POST",
                     headers: {
-                        Authorization: `Bearer ${this._makeJwt(metadata)}`
+                        Authorization: `Bearer ${this._makeJwt(metadata, recordingId)}`
                     }
                 },
                 this._routingTimeoutMs
@@ -149,7 +207,11 @@ export class MediaUploader {
         }
     }
 
-    private _makeJwt(metadata: SealedMetaData) {
+    private _makeJwt(metadata: SealedMetaData, recordingId?: string) {
+        const user = metadata.userId === undefined ? {} : { user_id: metadata.userId };
+        if (recordingId !== undefined) {
+            return signRecordingToken(metadata.channelKey, recordingId, user);
+        }
         const nowSeconds = Date.now() / 1000;
         return sign(
             {
@@ -168,7 +230,10 @@ export class MediaUploader {
     ) {
         if (!response.ok || (expectedStatus !== undefined && response.status !== expectedStatus)) {
             await response.body?.cancel().catch(() => undefined);
-            throw new Error(`${errorMessage}: ${response.status} ${response.statusText}`);
+            throw new HttpError(
+                `${errorMessage}: ${response.status} ${response.statusText}`,
+                response.status
+            );
         }
     }
 

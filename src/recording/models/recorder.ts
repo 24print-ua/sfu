@@ -8,6 +8,7 @@ import { Logger } from "#src/utils/utils.ts";
 import { DiskSpaceLimitReachedError } from "#src/utils/errors.ts";
 import { Channel } from "#src/core/models/channel.ts";
 import { STREAM_TYPE } from "#src/shared/enums.ts";
+import { StateNotifier, type StateReason } from "#src/recording/models/state_notifier.ts";
 import type { RecordingFlags } from "#src/shared/types.ts";
 import type { SessionId } from "#src/core/models/session.ts";
 
@@ -64,6 +65,8 @@ export type SealedMetaData = Metadata & {
 export type StopOptions = {
     save?: boolean;
     stopCode?: STOP_CODE;
+    /** user who requested the stop */
+    userId?: number;
 };
 
 export type UpdateData = {
@@ -82,6 +85,13 @@ export enum STOP_CODE {
 }
 
 const logger = new Logger("RECORDER");
+const STATE_REASONS: Record<STOP_CODE, StateReason> = {
+    [STOP_CODE.USER_REQUEST]: "user",
+    [STOP_CODE.CHANNEL_CLOSED]: "alone",
+    [STOP_CODE.RECORDING_TIMEOUT]: "max_duration",
+    [STOP_CODE.RECORDING_FAILED]: "error",
+    [STOP_CODE.DISK_SPACE_EXHAUSTED]: "error"
+};
 type LimitedVideoStreamType = STREAM_TYPE.CAMERA | STREAM_TYPE.SCREEN;
 type TrackedVideoSessions = {
     [STREAM_TYPE.CAMERA]: SessionId[];
@@ -120,6 +130,11 @@ export class Recorder extends EventEmitter {
     };
     private _transition?: Promise<void>;
     private _hasFailed = false;
+    /** name of the recording folder, set before its disk space is reserved */
+    private _recordingId?: string;
+    /** whether the current recording got past its start */
+    private _started = false;
+    private readonly _stateNotifier?: StateNotifier;
     private readonly _metaData: Metadata = {
         channelName: "",
         channelUUID: "",
@@ -155,6 +170,12 @@ export class Recorder extends EventEmitter {
         this._metaData.channelName = channel.name;
         this._metaData.channelUUID = channel.uuid;
         this._metaData.routingAddress = routingAddress;
+        if (config.RECORDING_STATE_CALLBACK) {
+            this._stateNotifier = new StateNotifier(
+                routingAddress,
+                channel.key?.toString("base64")
+            );
+        }
     }
 
     /**
@@ -181,7 +202,7 @@ export class Recorder extends EventEmitter {
             if (!(audio || video || transcription)) {
                 acknowledgement.resolve(true);
                 if (this.isRecording) {
-                    await this._stop({});
+                    await this._stop({ userId });
                 }
                 return;
             }
@@ -288,7 +309,7 @@ export class Recorder extends EventEmitter {
         }
     }
 
-    private async _stop({ save = true, stopCode = STOP_CODE.USER_REQUEST }: StopOptions) {
+    private async _stop({ save = true, stopCode = STOP_CODE.USER_REQUEST, userId }: StopOptions) {
         const startedAt = this._metaData.startedAt;
         const stoppedAt = Date.now();
         const shouldSave =
@@ -303,6 +324,10 @@ export class Recorder extends EventEmitter {
         this.video = false;
         this.transcription = false;
         this._emitStatus(stopCode);
+        const reason = this._hasFailed ? "error" : STATE_REASONS[stopCode];
+        this._notifyState(false, reason, reason === "user" ? userId : undefined);
+        this._started = false;
+        this._recordingId = undefined;
         logger.verbose(`terminating recorder for channel ${this._channel.name}`);
         clearTimeout(this._timeout);
         this._timeout = undefined;
@@ -401,6 +426,19 @@ export class Recorder extends EventEmitter {
         this._sessionStops.add(stopPromise);
     }
 
+    private _notifyState(active: boolean, reason: StateReason, userId?: number) {
+        if (!this._stateNotifier || !this._recordingId) {
+            return;
+        }
+        void this._stateNotifier.send({
+            recording_id: this._recordingId,
+            active,
+            started: this._started,
+            reason,
+            user_id: userId ?? null
+        });
+    }
+
     private _emitStatus(stopCode?: STOP_CODE) {
         this.emit(Recorder.Events.UPDATE, {
             audio: this.audio,
@@ -413,6 +451,8 @@ export class Recorder extends EventEmitter {
     private async _startRecording() {
         try {
             await this._start();
+            this._started = true;
+            this._notifyState(true, "user", this._metaData.userId);
             this._emitStatus();
         } catch (error) {
             let stopOptions: StopOptions;
@@ -437,11 +477,9 @@ export class Recorder extends EventEmitter {
 
     private async _start() {
         this._resetTrackedVideoSessions();
-        this._folder = await Folder.create(`${Date.now()}-${this._channel.uuid}`, [
-            "audio",
-            "camera",
-            "screen"
-        ]);
+        // the recording id of the state calls, also when reserving disk space fails
+        this._recordingId = `${Date.now()}-${this._channel.uuid}`;
+        this._folder = await Folder.create(this._recordingId, ["audio", "camera", "screen"]);
         clearTimeout(this._timeout);
         this._timeout = setTimeout(() => {
             this.stop({ stopCode: STOP_CODE.RECORDING_TIMEOUT });

@@ -1,6 +1,8 @@
 import { readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import type { SessionId } from "#src/core/models/session.ts";
+
 export const MANIFEST_FILENAME = "manifest.json";
 
 export type FramesManifest = {
@@ -18,12 +20,26 @@ export type FramesManifest = {
     error?: string;
 };
 
+export type TrackManifest = {
+    /** raw file, relative to the recording folder */
+    file: string;
+    session_id: SessionId;
+    /** why the track is missing from the mix */
+    error?: string;
+};
+
 /**
  * Describes the deliverables of a recording, written as `manifest.json` in its folder.
  * Each processing step owns one top-level key.
  */
 export type Manifest = {
     frames?: FramesManifest;
+    /** audio tracks of the participants (R16 of D005) */
+    tracks?: TrackManifest[];
+    /** the mixed audio, `error` when it could not be compiled */
+    mix?: { file?: string; error?: string };
+    /** the compiled video, `error` when it could not be compiled */
+    video?: { file?: string; error?: string };
 };
 
 export async function readManifest(directory: string): Promise<Manifest> {

@@ -85,6 +85,9 @@ Recording specific env variables:
 | `RECORDING_RAW_VIDEO_CONTAINER`         | Codec based        | No | `mkv` writes raw video in Matroska, readable after the writer is killed (H264 otherwise goes to mp4).                  |
 | `RECORDING_SCREEN_FRAMES`               | `false`            | No | If true, saves screen sharing as JPEG frames in `frames.zip` with a `frames` entry in `manifest.json`, see [recording](./doc/recording.md). |
 | `RECORDING_AUDIO_NORMALIZE`             | FFmpeg default     | No | `normalize` option of the `amix` audio mix; `0` keeps each voice at its own volume instead of dividing by the track count. |
+| `RECORDING_STATE_CALLBACK`              | `false`            | No | If true, posts each recording start and stop to `${recordingAddress}/state`, in order per channel, retried for 30 minutes, see [recording](./doc/recording.md). |
+| `RECORDING_DELIVERY_RETRY`              | `false`            | No | If true, a delivery failing on the network, a 5xx or a 429 is retried after 1, 5, 15, 30, 60 minutes, then hourly, until the recording expires (24 h). |
+| `RECORDING_ARCHIVE`                     | `false`            | No | If true, delivers one `recording.zip` (`mix.ogg`, transcripts, `frames.zip`, `manifest.json`) with `recording_id` in the requests and their JWT. |
 
 `RECORDING_RESERVATION_MB` controls the free-space check when a recording starts.
 It is an admission estimate, not a disk quota.

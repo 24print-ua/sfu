@@ -239,6 +239,25 @@ export const RECORDING_SCREEN_FRAMES: boolean = envFlag(process.env.RECORDING_SC
 export const RECORDING_AUDIO_NORMALIZE: "0" | "1" | undefined =
     (process.env.RECORDING_AUDIO_NORMALIZE?.trim() as "0" | "1") || undefined;
 
+/**
+ * If set, every start and stop of a recording is posted to `${recordingAddress}/state`,
+ * one call at a time per channel, retried with pauses for at least 30 minutes.
+ */
+export const RECORDING_STATE_CALLBACK: boolean = envFlag(process.env.RECORDING_STATE_CALLBACK);
+
+/**
+ * If set, a delivery that fails on the network, a 5xx or a 429 is retried with pauses
+ * (1, 5, 15, 30, 60 minutes, then hourly) until it succeeds or the recording expires
+ * (`fileTTL`). Other failures still discard the recording.
+ */
+export const RECORDING_DELIVERY_RETRY: boolean = envFlag(process.env.RECORDING_DELIVERY_RETRY);
+
+/**
+ * If set, a recording is delivered as one `recording.zip` (mix.ogg, transcripts, frames.zip,
+ * manifest.json) with its `recording_id` in the requests and in their JWT.
+ */
+export const RECORDING_ARCHIVE: boolean = envFlag(process.env.RECORDING_ARCHIVE);
+
 // ---------------------------------
 // ---------- CHECKS ---------------
 // ---------------------------------
@@ -334,6 +353,11 @@ export const recording = {
         quality: "5",
         limit: 3600,
         archive: "frames.zip"
+    },
+    /** single delivery archive, see `RECORDING_ARCHIVE` */
+    archive: {
+        name: "recording.zip",
+        mimeType: "application/zip"
     },
     /*
      * Limits the amount of video streams recorded at once.

@@ -6,6 +6,7 @@ import * as mediasoup from "mediasoup";
 import * as config from "#src/config.ts";
 import { Logger } from "#src/utils/utils.ts";
 import { DiskSpaceLimitReachedError, PortLimitReachedError } from "#src/utils/errors.ts";
+import { StateNotifier } from "#src/recording/models/state_notifier.ts";
 
 const availablePorts: number[] = [];
 let unique = 1;
@@ -119,6 +120,7 @@ export async function close(): Promise<void> {
     workers.clear();
     availablePorts.length = 0;
     Folder.resetReservations();
+    StateNotifier.closeAll();
     await clearFileSystem();
 }
 
