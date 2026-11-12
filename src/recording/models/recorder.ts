@@ -474,7 +474,7 @@ export class Recorder extends EventEmitter {
     private _getRecordingStates(): RecordingStates {
         return {
             audio: this.isRecording, // we always record audio as transcription can be requested at any time.
-            camera: this.isRecording && this.video,
+            camera: this.isRecording && this.video && config.RECORDING_CAMERAS,
             screen: this.isRecording && this.video
         };
     }

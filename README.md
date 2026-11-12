@@ -79,6 +79,12 @@ Recording specific env variables:
 | `DYNAMIC_MIN_PORT` / `DYNAMIC_MAX_PORT` | `50000` / `59999`  | No | Range of ports used for recording routing.                                                                             |
 | `RECORDING_RESERVATION_MB`               | Automatic worst case | No | Positive disk-space admission estimate per recording in MB (1 MB = 1,000,000 bytes). Overrides the estimate based on maximum duration, stream count and bitrates. |
 | `FFMPEG_LOGGING`                        | `false`            | No | If true, generates `.log` files alongside ffmpeg outputs and archives processed recordings under `${DATA_PATH}/debug`. |
+| `RECORDING_MAX_DURATION_MIN`            | `60`               | No | Maximum recording duration in minutes; the recording stops when reached.                                               |
+| `RECORDING_CAMERAS`                     | `true`             | No | If false, cameras are not recorded; screen sharing still is.                                                           |
+| `RECORDING_COMPILE_VIDEO`               | `true`             | No | If false, no video file is compiled; the raw screen files remain available for frames.                                 |
+| `RECORDING_RAW_VIDEO_CONTAINER`         | Codec based        | No | `mkv` writes raw video in Matroska, readable after the writer is killed (H264 otherwise goes to mp4).                  |
+| `RECORDING_SCREEN_FRAMES`               | `false`            | No | If true, saves screen sharing as JPEG frames in `frames.zip` with a `frames` entry in `manifest.json`, see [recording](./doc/recording.md). |
+| `RECORDING_AUDIO_NORMALIZE`             | FFmpeg default     | No | `normalize` option of the `amix` audio mix; `0` keeps each voice at its own volume instead of dividing by the track count. |
 
 `RECORDING_RESERVATION_MB` controls the free-space check when a recording starts.
 It is an admission estimate, not a disk quota.

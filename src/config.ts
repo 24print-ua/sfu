@@ -10,6 +10,8 @@ const envFlag = (value?: string) => {
     const normalized = value?.trim().toLowerCase();
     return Boolean(normalized && !FALSY_INPUT.has(normalized));
 };
+const envFlagOr = (value: string | undefined, fallback: boolean) =>
+    value?.trim() ? envFlag(value) : fallback;
 type LogLevel = "none" | "error" | "warn" | "info" | "debug" | "verbose";
 type WorkerLogLevel = "none" | "error" | "warn" | "debug";
 const testingMode = Boolean(process.env.JEST_WORKER_ID);
@@ -194,6 +196,49 @@ export const DYNAMIC_MAX_PORT: number =
  */
 export const FFMPEG_LOGGING = envFlag(process.env.FFMPEG_LOGGING);
 
+/**
+ * Maximum duration of a recording in minutes, defaults to 60. The recording stops when reached.
+ * e.g: RECORDING_MAX_DURATION_MIN=240
+ */
+export const RECORDING_MAX_DURATION_MIN: number = process.env.RECORDING_MAX_DURATION_MIN?.trim()
+    ? Number(process.env.RECORDING_MAX_DURATION_MIN)
+    : 60;
+
+/**
+ * Whether cameras are recorded, defaults to true. Screen sharing is recorded either way.
+ */
+export const RECORDING_CAMERAS: boolean = envFlagOr(process.env.RECORDING_CAMERAS, true);
+
+/**
+ * Whether the raw video streams are compiled into one video file, defaults to true.
+ * When false, the raw screen files remain available for `RECORDING_SCREEN_FRAMES`.
+ */
+export const RECORDING_COMPILE_VIDEO: boolean = envFlagOr(
+    process.env.RECORDING_COMPILE_VIDEO,
+    true
+);
+
+/**
+ * Container of the raw video files. Unset keeps the codec-based container (mp4 for H264).
+ * `mkv` stays readable when the writing process is killed.
+ * e.g: RECORDING_RAW_VIDEO_CONTAINER=mkv
+ */
+export const RECORDING_RAW_VIDEO_CONTAINER: "mkv" | undefined =
+    (process.env.RECORDING_RAW_VIDEO_CONTAINER?.trim() as "mkv") || undefined;
+
+/**
+ * If set, screen sharing is saved as JPEG frames (`frames.zip`) during processing.
+ */
+export const RECORDING_SCREEN_FRAMES: boolean = envFlag(process.env.RECORDING_SCREEN_FRAMES);
+
+/**
+ * The `normalize` option of the ffmpeg `amix` filter used to mix the audio tracks.
+ * Unset keeps the ffmpeg default (normalized: volume drops as participants are added).
+ * e.g: RECORDING_AUDIO_NORMALIZE=0
+ */
+export const RECORDING_AUDIO_NORMALIZE: "0" | "1" | undefined =
+    (process.env.RECORDING_AUDIO_NORMALIZE?.trim() as "0" | "1") || undefined;
+
 // ---------------------------------
 // ---------- CHECKS ---------------
 // ---------------------------------
@@ -219,6 +264,15 @@ if (
         !Number.isSafeInteger(Math.ceil(RECORDING_RESERVATION_MB * 1_000_000)))
 ) {
     throw new Error("RECORDING_RESERVATION_MB must be positive with a safe integer byte size");
+}
+if (!(RECORDING_MAX_DURATION_MIN > 0 && Number.isFinite(RECORDING_MAX_DURATION_MIN))) {
+    throw new Error("RECORDING_MAX_DURATION_MIN must be a positive number of minutes");
+}
+if (RECORDING_RAW_VIDEO_CONTAINER !== undefined && RECORDING_RAW_VIDEO_CONTAINER !== "mkv") {
+    throw new Error("RECORDING_RAW_VIDEO_CONTAINER must be mkv or unset");
+}
+if (RECORDING_AUDIO_NORMALIZE !== undefined && !["0", "1"].includes(RECORDING_AUDIO_NORMALIZE)) {
+    throw new Error("RECORDING_AUDIO_NORMALIZE must be 0, 1 or unset");
 }
 
 // ------------------------------------------------------------
@@ -257,7 +311,7 @@ export const recording = {
     enabled: RECORDING,
     metadataFileName: "metadata.bin",
     minDuration: 5 /* sec */ * 1000, // TODO should probably be raised in prod
-    maxDuration: 60 /* min */ * 60 * 1000,
+    maxDuration: RECORDING_MAX_DURATION_MIN * 60 * 1000,
     fileTTL: 24 /* hours */ * 60 * 60 * 1000,
     processingCooldown: 5 /* sec */ * 1000,
     video: {
@@ -272,6 +326,14 @@ export const recording = {
         bitRate: "32k",
         ext: "ogg",
         mimeType: "audio/ogg"
+    },
+    /** screen frames, see `RECORDING_SCREEN_FRAMES` */
+    frames: {
+        // one frame per second, consecutive duplicates dropped
+        filter: "fps=1,mpdecimate,scale=w='min(1280,iw)':h=-2",
+        quality: "5",
+        limit: 3600,
+        archive: "frames.zip"
     },
     /*
      * Limits the amount of video streams recorded at once.

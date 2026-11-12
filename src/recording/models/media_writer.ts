@@ -206,6 +206,9 @@ export class MediaWriter extends EventEmitter {
     }
 
     private _getContainerExtension(): string {
+        if (this._rtp.kind === "video" && config.RECORDING_RAW_VIDEO_CONTAINER) {
+            return config.RECORDING_RAW_VIDEO_CONTAINER;
+        }
         const codec = this._rtp.codec?.toLowerCase();
         switch (codec) {
             /**

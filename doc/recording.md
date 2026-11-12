@@ -127,6 +127,26 @@ the first `file_state_change` with `active: true` marks the start of a file and 
 
 timestamps are the source of truth because one file can span active and inactive periods without restarting FFmpeg
 
+#### optional settings
+
+These settings default to the upstream behaviour (see [README](../README.md)):
+
+-   `RECORDING_MAX_DURATION_MIN` sets the duration limit (`recording_timeout`).
+-   `RECORDING_CAMERAS=false` creates no camera sinks; screen sharing is still recorded.
+-   `RECORDING_RAW_VIDEO_CONTAINER=mkv` writes every raw video file as `.mkv`,
+    which stays readable when FFmpeg is killed (an unfinished mp4 has no index).
+-   `RECORDING_COMPILE_VIDEO=false` skips the compiled video; only audio is delivered.
+-   `RECORDING_AUDIO_NORMALIZE=0` mixes audio with `amix` `normalize=0`, so a voice
+    is not attenuated by the number of tracks.
+-   `RECORDING_SCREEN_FRAMES=1` saves the screen files as JPEG frames before compilation:
+    one frame per second with consecutive duplicates dropped (`fps=1,mpdecimate`),
+    at most 1280 px wide, `-q:v 5`. Each frame is named by its offset from `startedAt`
+    in milliseconds, from the first active `timeStamps` entry of its file. Frames are
+    stored in `frames.zip` in the recording folder; above 3600 frames they are thinned
+    evenly. `manifest.json` gets a `frames` entry (`file`, `count`, `extracted`,
+    `limit`, `thinned`, or `error` when extraction failed, which does not discard
+    the other media). `frames.zip` and `manifest.json` are not uploaded by this step.
+
 ## scheduler service and post-processing
 
 the scheduler scans finalized raw recordings sequentially and defers media processing while CPU load is high

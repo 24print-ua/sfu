@@ -3,7 +3,9 @@ import path from "node:path";
 
 import * as config from "#src/config.ts";
 import { decrypt } from "#src/core/services/auth.ts";
-import { MediaCompiler } from "#src/recording/models/media_compiler.ts";
+import { COMPILATION_TIMEOUT, MediaCompiler } from "#src/recording/models/media_compiler.ts";
+import { updateManifest } from "#src/recording/models/manifest.ts";
+import { compileScreenFrames } from "#src/recording/models/screen_frames.ts";
 import { type SealedMetaData } from "#src/recording/models/recorder.ts";
 import { MediaUploader } from "#src/recording/models/media_uploader.ts";
 import { Logger } from "#src/utils/utils.ts";
@@ -56,7 +58,13 @@ export class RecordingProcessor {
             if (metadata.transcription && audioPath) {
                 await this._uploader.transcribe({ filePath: audioPath, metadata });
             }
-            const videoPath = metadata.video ? await compiler.getVideo() : undefined;
+            if (metadata.video && config.RECORDING_SCREEN_FRAMES) {
+                await this._compileScreenFrames(recordingDirectory, metadata);
+            }
+            const videoPath =
+                metadata.video && config.RECORDING_COMPILE_VIDEO
+                    ? await compiler.getVideo()
+                    : undefined;
             const mediaPath = videoPath ?? (metadata.audio ? audioPath : undefined);
             if (mediaPath) {
                 await this._uploader.uploadMedia({
@@ -85,6 +93,27 @@ export class RecordingProcessor {
                 logger.error(`Failed to discard recording ${folderName}: ${cleanupError}`);
                 return false;
             }
+        }
+    }
+
+    /**
+     * A frame failure is recorded in the manifest and does not discard the other media.
+     */
+    private async _compileScreenFrames(workingDir: string, metadata: SealedMetaData) {
+        try {
+            await compileScreenFrames({
+                workingDir,
+                startedAt: metadata.startedAt,
+                stoppedAt: metadata.stoppedAt,
+                timeStamps: metadata.timeStamps,
+                signal: AbortSignal.timeout(COMPILATION_TIMEOUT)
+            });
+        } catch (error) {
+            logger.error(`Failed to save screen frames of ${workingDir}: ${error}`);
+            const { limit } = config.recording.frames;
+            await updateManifest(workingDir, {
+                frames: { count: 0, extracted: 0, limit, thinned: false, error: String(error) }
+            });
         }
     }
 

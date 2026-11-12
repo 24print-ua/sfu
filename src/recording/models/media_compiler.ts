@@ -10,9 +10,9 @@ import { STREAM_TYPE } from "#src/shared/enums.ts";
 
 const logger = new Logger("MEDIA_COMPILER");
 const FILENAME_PREFIX = "recording_";
-const COMPILATION_TIMEOUT = config.recording.maxDuration * 2;
+export const COMPILATION_TIMEOUT = config.recording.maxDuration * 2;
 const FFPROBE_TIMEOUT = 30_000;
-const INPUT_RECOVERY_OPTIONS = ["-fflags", "+discardcorrupt"];
+export const INPUT_RECOVERY_OPTIONS = ["-fflags", "+discardcorrupt"];
 
 /**
  * Returns the media subprocess environment without SFU authentication
@@ -25,57 +25,67 @@ function getMediaProcessEnv(): NodeJS.ProcessEnv {
     return env;
 }
 
+/**
+ * Runs FFmpeg with the given arguments, logging to `logPath` when `FFMPEG_LOGGING` is set.
+ *
+ * @throws {Error} If FFmpeg cannot start or exits with a non-zero code or a signal.
+ */
+export function spawnFfmpeg(
+    commandArgs: string[],
+    logPath: string,
+    signal: AbortSignal
+): Promise<void> {
+    logger.debug(`Running FFmpeg: ffmpeg ${commandArgs.join(" ")}`);
+    return new Promise<void>((resolve, reject) => {
+        const proc = spawn("ffmpeg", commandArgs, {
+            env: getMediaProcessEnv(),
+            stdio: config.FFMPEG_LOGGING ? ["ignore", "pipe", "pipe"] : "ignore",
+            signal,
+            killSignal: "SIGKILL"
+        });
+        const logStream = config.FFMPEG_LOGGING ? fs.createWriteStream(logPath) : undefined;
+        if (logStream) {
+            logStream.on("error", (error) => {
+                logger.error(`FFmpeg log failure: ${error}`);
+                proc.stderr?.unpipe(logStream);
+                proc.stdout?.unpipe(logStream);
+                proc.stderr?.resume();
+                proc.stdout?.resume();
+            });
+            proc.stderr?.pipe(logStream, { end: false });
+            proc.stdout?.pipe(logStream, { end: false });
+        }
+        let processError: Error | undefined;
+        proc.once("error", (error) => {
+            processError = error;
+        });
+        proc.once("close", (code, exitSignal) => {
+            logStream?.end();
+            if (processError) {
+                reject(processError);
+            } else if (code === 0) {
+                resolve();
+            } else {
+                reject(
+                    new Error(
+                        `FFmpeg exited with ${
+                            code === null ? `signal ${exitSignal}` : `code ${code}`
+                        }`
+                    )
+                );
+            }
+        });
+    });
+}
+
 async function runFfmpeg(args: string[], outputPath: string, signal: AbortSignal): Promise<string> {
     const extension = path.extname(outputPath);
     const partialPath = path.join(
         path.dirname(outputPath),
         `${path.basename(outputPath, extension)}.partial${extension}`
     );
-    const commandArgs = ["-y", ...args, partialPath];
-    logger.debug(`Running FFmpeg: ffmpeg ${commandArgs.join(" ")}`);
     try {
-        await new Promise<void>((resolve, reject) => {
-            const proc = spawn("ffmpeg", commandArgs, {
-                env: getMediaProcessEnv(),
-                stdio: config.FFMPEG_LOGGING ? ["ignore", "pipe", "pipe"] : "ignore",
-                signal,
-                killSignal: "SIGKILL"
-            });
-            const logStream = config.FFMPEG_LOGGING
-                ? fs.createWriteStream(`${outputPath}.log`)
-                : undefined;
-            if (logStream) {
-                logStream.on("error", (error) => {
-                    logger.error(`FFmpeg log failure: ${error}`);
-                    proc.stderr?.unpipe(logStream);
-                    proc.stdout?.unpipe(logStream);
-                    proc.stderr?.resume();
-                    proc.stdout?.resume();
-                });
-                proc.stderr?.pipe(logStream, { end: false });
-                proc.stdout?.pipe(logStream, { end: false });
-            }
-            let processError: Error | undefined;
-            proc.once("error", (error) => {
-                processError = error;
-            });
-            proc.once("close", (code, exitSignal) => {
-                logStream?.end();
-                if (processError) {
-                    reject(processError);
-                } else if (code === 0) {
-                    resolve();
-                } else {
-                    reject(
-                        new Error(
-                            `FFmpeg exited with ${
-                                code === null ? `signal ${exitSignal}` : `code ${code}`
-                            }`
-                        )
-                    );
-                }
-            });
-        });
+        await spawnFfmpeg(["-y", ...args, partialPath], `${outputPath}.log`, signal);
         await rename(partialPath, outputPath);
         return outputPath;
     } catch (error) {
@@ -84,7 +94,7 @@ async function runFfmpeg(args: string[], outputPath: string, signal: AbortSignal
     }
 }
 
-async function validateMediaFile(
+export async function validateMediaFile(
     filePath: string,
     stream: "a:0" | "v:0",
     signal: AbortSignal
@@ -284,8 +294,11 @@ export class MediaCompiler {
         });
 
         const mixInputs = relevantFiles.map((_, i) => `[a${i}]`).join("");
+        const normalize = config.RECORDING_AUDIO_NORMALIZE
+            ? `:normalize=${config.RECORDING_AUDIO_NORMALIZE}`
+            : "";
         filterComplex.push(
-            `${mixInputs}amix=inputs=${relevantFiles.length}:dropout_transition=0[out]`
+            `${mixInputs}amix=inputs=${relevantFiles.length}:dropout_transition=0${normalize}[out]`
         );
         const args = [
             ...inputs,
