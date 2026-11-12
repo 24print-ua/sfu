@@ -207,6 +207,23 @@ rest is still delivered. Routing and completion carry `recording_id` (the folder
 name) first in the query, and every JWT to Odoo, `state` included, carries
 `aud: "24print-call-recording"`, `recording_id` and `exp - iat = 600` (24print-ua/24print-hub#227).
 
+With `RECORDING_ARCHIVE` and `RECORDING_TRANSCRIBE_URL` (with `RECORDING_TRANSCRIBE_API_KEY`) each audio track
+is transcribed before the archive is built, one request at a time. The session token's
+`label` and `user_id` are kept in the `file_state_change` metadata of its tracks. A track
+is cut into 5-minute Opus chunks under `transcription/` in the recording folder (pauses
+of the raw file filled with silence); a chunk where `silencedetect` finds no sound is not
+sent. The service detects the language; phrases with empty text are dropped. Phrases are
+shifted by the chunk and the track start and written, by time, to `transcript.txt`
+(`[mm:ss] label: text`) and `transcript.json` (`start_ms`, `end_ms`, `user_id`, `label`,
+`text`). A track without `label`, or answered with a 4xx other than 429, is reported in
+`manifest.json` (`transcription.tracks[].error`) and the other tracks go on. A network
+failure, a timeout (25 min), a 5xx or a 429 keeps the recording queued: the recording goes
+back to `metadata.bin`, `transcription.json` records the time of the next request (after
+1, 5, 15, 30 minutes, then hourly) and other recordings are processed meanwhile.
+Recognized chunks are kept and never sent again. 18 h after the recording stopped, the
+chunks left are reported in `manifest.json` and the archive goes with what was recognized,
+leaving the rest of `fileTTL` to the delivery.
+
 With `RECORDING_DELIVERY_RETRY=1` a delivery that fails on the network, with a 5xx or
 a 429 keeps the recording queued: `metadata.bin.processing` goes back to
 `metadata.bin` and `delivery.json` in the folder records the failed attempts and the

@@ -28,11 +28,29 @@ export type TrackManifest = {
     error?: string;
 };
 
+export type TranscriptionTrackManifest = {
+    /** raw file, relative to the recording folder */
+    file: string;
+    session_id: SessionId;
+    user_id?: number;
+    label?: string;
+    /** 5-minute chunks of the track */
+    chunks: number;
+    /** chunks recognized, their phrases are in the transcripts */
+    recognized: number;
+    /** chunks without sound, not sent */
+    silent: number;
+    /** why the track, or some of its chunks, is missing from the transcripts (R16 of D005) */
+    error?: string;
+};
+
 /**
  * Describes the deliverables of a recording, written as `manifest.json` in its folder.
  * Each processing step owns one top-level key.
  */
 export type Manifest = {
+    /** per-track transcription (R10-R12, R16 of D005) */
+    transcription?: { tracks: TranscriptionTrackManifest[]; error?: string };
     frames?: FramesManifest;
     /** audio tracks of the participants (R16 of D005) */
     tracks?: TrackManifest[];

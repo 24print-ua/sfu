@@ -38,6 +38,10 @@ export type TimeTagInfo = {
      * marks the end of file
      */
     eof?: boolean;
+    /** speaker name from the session token, with `RECORDING_TRANSCRIBE_URL` (R11 of D005) */
+    label?: string;
+    /** user id from the session token, with `RECORDING_TRANSCRIBE_URL` */
+    userId?: number;
 };
 export type TimeStampData = {
     tag: TIME_TAG;

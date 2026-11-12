@@ -15,13 +15,14 @@ const FFPROBE_TIMEOUT = 30_000;
 export const INPUT_RECOVERY_OPTIONS = ["-fflags", "+discardcorrupt"];
 
 /**
- * Returns the media subprocess environment without SFU authentication
- * or local encryption keys. Leaves the server environment unchanged.
+ * Returns the media subprocess environment without SFU authentication, local
+ * encryption or transcription keys. Leaves the server environment unchanged.
  */
 function getMediaProcessEnv(): NodeJS.ProcessEnv {
     const env = { ...process.env };
     delete env.AUTH_KEY;
     delete env.LOCAL_KEY;
+    delete env.RECORDING_TRANSCRIBE_API_KEY;
     return env;
 }
 

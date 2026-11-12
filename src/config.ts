@@ -258,6 +258,22 @@ export const RECORDING_DELIVERY_RETRY: boolean = envFlag(process.env.RECORDING_D
  */
 export const RECORDING_ARCHIVE: boolean = envFlag(process.env.RECORDING_ARCHIVE);
 
+/**
+ * `/asr` endpoint of a Whisper ASR webservice (whisperx engine). If set, each audio track
+ * is transcribed in 5-minute chunks, one request at a time, into `transcript.txt` and
+ * `transcript.json` of `recording.zip`. Requires `RECORDING_TRANSCRIBE_API_KEY`;
+ * ignored without `RECORDING_ARCHIVE`.
+ * e.g: RECORDING_TRANSCRIBE_URL=https://app.24print.ua:9443/asr
+ */
+export const RECORDING_TRANSCRIBE_URL: string | undefined =
+    process.env.RECORDING_TRANSCRIBE_URL?.trim() || undefined;
+
+/**
+ * `X-API-Key` of the requests to `RECORDING_TRANSCRIBE_URL`.
+ */
+export const RECORDING_TRANSCRIBE_API_KEY: string | undefined =
+    process.env.RECORDING_TRANSCRIBE_API_KEY?.trim() || undefined;
+
 // ---------------------------------
 // ---------- CHECKS ---------------
 // ---------------------------------
@@ -292,6 +308,9 @@ if (RECORDING_RAW_VIDEO_CONTAINER !== undefined && RECORDING_RAW_VIDEO_CONTAINER
 }
 if (RECORDING_AUDIO_NORMALIZE !== undefined && !["0", "1"].includes(RECORDING_AUDIO_NORMALIZE)) {
     throw new Error("RECORDING_AUDIO_NORMALIZE must be 0, 1 or unset");
+}
+if (Boolean(RECORDING_TRANSCRIBE_URL) !== Boolean(RECORDING_TRANSCRIBE_API_KEY)) {
+    throw new Error("RECORDING_TRANSCRIBE_URL and RECORDING_TRANSCRIBE_API_KEY go together");
 }
 
 // ------------------------------------------------------------
@@ -358,6 +377,30 @@ export const recording = {
     archive: {
         name: "recording.zip",
         mimeType: "application/zip"
+    },
+    /** per-track transcription, see `RECORDING_TRANSCRIBE_URL` */
+    transcription: {
+        /** transcripts only travel in `recording.zip` */
+        enabled: Boolean(RECORDING_TRANSCRIBE_URL) && RECORDING_ARCHIVE,
+        url: RECORDING_TRANSCRIBE_URL,
+        apiKey: RECORDING_TRANSCRIBE_API_KEY,
+        /** one request per chunk, so a request stays well under the gateway's 3600 s */
+        chunkDuration: 5 /* min */ * 60_000,
+        /**
+         * a 5-minute chunk took 4.5 min through the gateway (24print-ua/24print-hub#232):
+         * over three times that, with room to wait behind other clients, under 30 min
+         */
+        requestTimeout: 25 /* min */ * 60_000,
+        /** pauses after the 1st to 4th failed request; then `retryInterval` */
+        retryDelays: [1, 5, 15, 30].map((minutes) => minutes * 60_000),
+        retryInterval: 60 /* min */ * 60_000,
+        /** after the recording stops; the rest of `fileTTL` is left to the delivery */
+        deadline: 18 /* hours */ * 60 * 60_000,
+        /** `silencedetect`: a chunk under this level throughout is not sent */
+        silenceNoise: "-45dB",
+        silenceMinDuration: "2",
+        /** chunk encoding sent to the service */
+        chunkArgs: ["-ac", "1", "-ar", "16000", "-c:a", "libopus", "-b:a", "32k"]
     },
     /*
      * Limits the amount of video streams recorded at once.

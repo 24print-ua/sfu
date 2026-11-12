@@ -1,5 +1,6 @@
 import path from "node:path";
 
+import * as config from "#src/config.ts";
 import { MediaSink, type MediaSinkFailure } from "#src/recording/models/media_sink.ts";
 import { Session, type SessionProducer } from "#src/core/models/session.ts";
 import { Logger } from "#src/utils/utils.ts";
@@ -177,7 +178,11 @@ export class SessionRecorder {
                         filename,
                         type: data.type,
                         sessionId: this._session.id,
-                        eof
+                        eof,
+                        // the speaker of the track transcript (R11 of D005)
+                        ...(config.recording.transcription.enabled
+                            ? { label: this._session.label, userId: this._session.userId }
+                            : {})
                     },
                     this
                 );

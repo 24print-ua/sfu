@@ -14,6 +14,11 @@ import {
 import { compileScreenFrames } from "#src/recording/models/screen_frames.ts";
 import { TIME_TAG, type SealedMetaData } from "#src/recording/models/recorder.ts";
 import { MediaUploader, isRetryable } from "#src/recording/models/media_uploader.ts";
+import {
+    TranscriptionPending,
+    readTranscriptionState,
+    transcribeRecording
+} from "#src/recording/models/transcriber.ts";
 import { writeZip, type ZipEntry } from "#src/recording/models/zip.ts";
 import { STREAM_TYPE } from "#src/shared/enums.ts";
 import { Logger } from "#src/utils/utils.ts";
@@ -26,8 +31,8 @@ const DELIVERY_RETRY_INTERVAL = 60 * MINUTE;
 /** retries of a recording, kept in its folder across restarts, see `RECORDING_DELIVERY_RETRY` */
 export const DELIVERY_STATE_FILENAME = "delivery.json";
 /**
- * Transcripts written in the recording folder by the transcription step (24print-hub#232),
- * added to the archive when present.
+ * Transcripts written in the recording folder by the transcription step (24print-hub#232,
+ * `RECORDING_TRANSCRIBE_URL`), added to the archive when present.
  */
 export const TRANSCRIPT_FILES = ["transcript.txt", "transcript.json"];
 
@@ -71,7 +76,8 @@ export class RecordingProcessor {
     /**
      * Process a queued recording and discard its files on failure.
      * With `RECORDING_DELIVERY_RETRY`, a retryable delivery failure keeps the recording
-     * queued until its next attempt instead.
+     * queued until its next attempt instead. With `RECORDING_TRANSCRIBE_URL`, so does a
+     * transcription waiting for its next request.
      *
      * @returns `true` if the directory was removed or archived, `false` if processing
      * is deferred by CPU load, by a pending retry, or directory cleanup failed.
@@ -92,12 +98,24 @@ export class RecordingProcessor {
             if (retry && retry.nextAttemptAt > Date.now()) {
                 return false;
             }
+            if (
+                config.recording.transcription.enabled &&
+                (await readTranscriptionState(recordingDirectory)).nextAttemptAt > Date.now()
+            ) {
+                return false;
+            }
             // Consume the queued metadata so cleanup failure or restart cannot replay delivery.
             await fs.rename(metadataPath, processingPath);
             let delivered: boolean;
             try {
                 delivered = await this._deliver(recordingDirectory, folderName, metadata);
             } catch (error) {
+                if (error instanceof TranscriptionPending) {
+                    // other recordings go first meanwhile
+                    await fs.rename(processingPath, metadataPath);
+                    logger.warn(`Transcription of ${folderName} paused: ${error.message}`);
+                    return false;
+                }
                 if (!retry || !isRetryable(error)) {
                     throw error;
                 }
@@ -226,6 +244,9 @@ export class RecordingProcessor {
                 ))
             );
         }
+        if (metadata.audio && config.recording.transcription.enabled) {
+            await this._transcribe(recordingDirectory, metadata, compiler);
+        }
         for (const name of TRANSCRIPT_FILES) {
             const file = path.join(recordingDirectory, name);
             if (await exists(file)) {
@@ -255,6 +276,30 @@ export class RecordingProcessor {
             recordingId: folderName
         });
         return true;
+    }
+
+    /**
+     * Transcribes the tracks into the transcripts; an unexpected failure is reported in
+     * `manifest.json` and does not hold the rest of the recording (R16 of D005).
+     *
+     * @throws {TranscriptionPending} when the next request has to wait
+     */
+    private async _transcribe(
+        recordingDirectory: string,
+        metadata: SealedMetaData,
+        compiler: MediaCompiler
+    ) {
+        try {
+            await transcribeRecording(recordingDirectory, metadata, compiler.unreadableFiles);
+        } catch (error) {
+            if (error instanceof TranscriptionPending) {
+                throw error;
+            }
+            logger.error(`Failed to transcribe ${recordingDirectory}: ${error}`);
+            await updateManifest(recordingDirectory, {
+                transcription: { tracks: [], error: String(error) }
+            });
+        }
     }
 
     /**
