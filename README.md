@@ -88,7 +88,7 @@ Recording specific env variables:
 | `RECORDING_STATE_CALLBACK`              | `false`            | No | If true, posts each recording start and stop to `${recordingAddress}/state`, in order per channel, retried for 30 minutes, see [recording](./doc/recording.md). |
 | `RECORDING_DELIVERY_RETRY`              | `false`            | No | If true, a delivery failing on the network, a 5xx or a 429 is retried after 1, 5, 15, 30, 60 minutes, then hourly, until the recording expires (24 h). |
 | `RECORDING_ARCHIVE`                     | `false`            | No | If true, delivers one `recording.zip` (`mix.ogg`, transcripts, `frames.zip`, `manifest.json`) with `recording_id` in the requests and their JWT. |
-| `RECORDING_TRANSCRIBE_URL`              |                    | No | `/asr` endpoint of a Whisper ASR webservice (whisperx); if set, each audio track is transcribed into `transcript.txt` and `transcript.json` of `recording.zip`, see [recording](./doc/recording.md). Only with `RECORDING_ARCHIVE`. |
+| `RECORDING_TRANSCRIBE_URL`              |                    | No | `/asr` endpoint of a recognition service with the Whisper ASR webservice API (`parakeet-asr`); if set, each audio track is transcribed into `transcript.txt` and `transcript.json` of `recording.zip`, see [recording](./doc/recording.md). Only with `RECORDING_ARCHIVE`. |
 | `RECORDING_TRANSCRIBE_API_KEY`          |                    | With `RECORDING_TRANSCRIBE_URL` | `X-API-Key` of the transcription requests. |
 
 `RECORDING_RESERVATION_MB` controls the free-space check when a recording starts.

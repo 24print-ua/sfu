@@ -268,11 +268,12 @@ export const RECORDING_DELIVERY_RETRY: boolean = envFlag(process.env.RECORDING_D
 export const RECORDING_ARCHIVE: boolean = envFlag(process.env.RECORDING_ARCHIVE);
 
 /**
- * `/asr` endpoint of a Whisper ASR webservice (whisperx engine). If set, each audio track
- * is transcribed in 5-minute chunks, one request at a time, into `transcript.txt` and
- * `transcript.json` of `recording.zip`. Requires `RECORDING_TRANSCRIBE_API_KEY`;
- * ignored without `RECORDING_ARCHIVE`.
- * e.g: RECORDING_TRANSCRIBE_URL=https://app.24print.ua:9443/asr
+ * `/asr` endpoint of a speech recognition service with the Whisper ASR webservice API,
+ * e.g. `parakeet-asr` (Parakeet TDT 0.6B v3) behind the 24print asr-gateway. If set, each
+ * audio track is transcribed in 5-minute chunks, one request at a time, into
+ * `transcript.txt` and `transcript.json` of `recording.zip`. Requires
+ * `RECORDING_TRANSCRIBE_API_KEY`; ignored without `RECORDING_ARCHIVE`.
+ * e.g: RECORDING_TRANSCRIBE_URL=https://app.24print.ua:9444/asr
  */
 export const RECORDING_TRANSCRIBE_URL: string | undefined =
     process.env.RECORDING_TRANSCRIBE_URL?.trim() || undefined;
@@ -397,13 +398,14 @@ export const recording = {
         enabled: Boolean(RECORDING_TRANSCRIBE_URL) && RECORDING_ARCHIVE,
         url: RECORDING_TRANSCRIBE_URL,
         apiKey: RECORDING_TRANSCRIBE_API_KEY,
-        /** one request per chunk, so a request stays well under the gateway's 3600 s */
+        /** a failed request loses at most 5 minutes of recognized speech */
         chunkDuration: 5 /* min */ * 60_000,
         /**
-         * a 5-minute chunk took 4.5 min through the gateway (24print-ua/24print-hub#232):
-         * over three times that, with room to wait behind other clients, under 30 min
+         * Parakeet recognizes a 5-minute chunk in 18-23 s on the server, 40 s at most
+         * (24print-ua/24print-hub#267): three times that plus one request ahead (the
+         * service takes one at a time), with room, under the gateway's 600 s read timeout
          */
-        requestTimeout: 25 /* min */ * 60_000,
+        requestTimeout: 5 /* min */ * 60_000,
         /** pauses after the 1st to 4th failed request; then `retryInterval` */
         retryDelays: [1, 5, 15, 30].map((minutes) => minutes * 60_000),
         retryInterval: 60 /* min */ * 60_000,

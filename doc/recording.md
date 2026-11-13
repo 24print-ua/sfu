@@ -212,12 +212,15 @@ is transcribed before the archive is built, one request at a time. The session t
 `label` and `user_id` are kept in the `file_state_change` metadata of its tracks. A track
 is cut into 5-minute Opus chunks under `transcription/` in the recording folder (pauses
 of the raw file filled with silence); a chunk where `silencedetect` finds no sound is not
-sent. The service detects the language; phrases with empty text are dropped. Phrases are
+sent. The service (`parakeet-asr` or a Whisper ASR webservice, `segments[].start`, `end`,
+`text`) detects the language; phrases with empty text are dropped, and so are phrases of
+up to 3 words without a Cyrillic letter (recognition noise such as "Yeah", "Um"; listed
+in `manifest.json`, `transcription.tracks[].dropped`, with `start_ms` and `text`). Phrases are
 shifted by the chunk and the track start and written, by time, to `transcript.txt`
 (`[mm:ss] label: text`) and `transcript.json` (`start_ms`, `end_ms`, `user_id`, `label`,
 `text`). A track without `label`, or answered with a 4xx other than 429, is reported in
 `manifest.json` (`transcription.tracks[].error`) and the other tracks go on. A network
-failure, a timeout (25 min), a 5xx or a 429 keeps the recording queued: the recording goes
+failure, a timeout (5 min), a 5xx or a 429 keeps the recording queued: the recording goes
 back to `metadata.bin`, `transcription.json` records the time of the next request (after
 1, 5, 15, 30 minutes, then hourly) and other recordings are processed meanwhile.
 Recognized chunks are kept and never sent again. 18 h after the recording stopped, the

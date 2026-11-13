@@ -26,6 +26,10 @@ const CHUNK_PATTERN = /^chunk_(\d{4})\.ogg$/;
 /** seconds a silence may miss at the edges of a chunk it covers */
 const SILENCE_MARGIN = 0.1;
 const MAX_ERROR_BODY = 300;
+/** the letters of Russian and Ukrainian, the languages of the calls (R10 of D005) */
+const CYRILLIC = /[А-Яа-яЁёІіЇїЄєҐґ]/;
+/** a phrase of up to this many words without a Cyrillic letter is noise (R12 of D005) */
+const NOISE_MAX_WORDS = 3;
 
 type TranscriptionState = {
     /** failed requests in a row */
@@ -91,7 +95,8 @@ export async function readTranscriptionState(directory: string): Promise<Transcr
  * Transcribes each audio track (R10 of D005) in chunks of `chunkDuration`, one request at
  * a time, and writes `transcript.txt` and `transcript.json` in `directory` with the phrases
  * of every track, by time, each with its speaker (R11, R12). Chunks without sound are not
- * sent; recognized chunks are kept in the folder and never sent again.
+ * sent; recognized chunks are kept in the folder and never sent again. Short phrases
+ * without a Cyrillic letter are left out and listed in `manifest.json` (R12).
  *
  * A track without speaker name, or answered with a final error, is reported in
  * `manifest.json` (`transcription.tracks[].error`) and the others go on (R16). A network
@@ -293,7 +298,10 @@ function parseSilences(printed: string): { start: number; end: number }[] {
 }
 
 /**
- * Sends a chunk to the Whisper ASR service, language detected by the service.
+ * Sends a chunk to the recognition service (`parakeet-asr`, Whisper ASR webservice API),
+ * language detected by the service. The answer is
+ * `{"text", "segments": [{"id", "start", "end", "text"}], "language"}`, times in seconds
+ * from the start of the chunk.
  *
  * @returns the phrases with text, empty ones dropped
  */
@@ -335,8 +343,8 @@ async function recognize(file: string, timeoutMs: number): Promise<Segment[]> {
 /**
  * POSTs `form` through `node:http(s)`: `fetch` (undici) gives up after 300 s without the
  * response headers, and the service answers a chunk only once it is recognized, which
- * takes ~4.5 min on an idle host (24print-ua/24print-hub#232). Here `timeoutMs` is the
- * only limit.
+ * took ~4.5 min with Whisper (24print-ua/24print-hub#232) and may wait behind another
+ * request. Here `timeoutMs` is the only limit.
  *
  * @throws {TypeError} on a network failure, as `fetch` does
  * @throws {DOMException} `TimeoutError` after `timeoutMs`
@@ -426,8 +434,13 @@ async function writeTranscripts(
             entry.recognized += 1;
             const chunkStart = track.offset + index * chunkDuration;
             for (const { start, end, text } of phrases) {
+                const start_ms = Math.max(0, Math.round(chunkStart + start * 1000));
+                if (isNoise(text)) {
+                    (entry.dropped ??= []).push({ start_ms, text });
+                    continue;
+                }
                 segments.push({
-                    start_ms: Math.max(0, Math.round(chunkStart + start * 1000)),
+                    start_ms,
                     end_ms: Math.max(0, Math.round(chunkStart + end * 1000)),
                     user_id: track.userId ?? null,
                     label: track.label,
@@ -454,6 +467,15 @@ async function writeTranscripts(
     await writeAtomic(path.join(directory, "transcript.txt"), lines.join(""));
     await writeJson(path.join(directory, "transcript.json"), segments);
     await updateManifest(directory, { transcription: { tracks: manifest } });
+}
+
+/**
+ * Recognition noise on short sounds (backchannels, noise): up to `NOISE_MAX_WORDS` words
+ * without a Cyrillic letter, e.g. "Yeah", "Um" (R12 of D005). A short reply wholly in
+ * English or Polish is lost with it.
+ */
+function isNoise(text: string): boolean {
+    return !CYRILLIC.test(text) && text.split(/\s+/).length <= NOISE_MAX_WORDS;
 }
 
 async function readJson<T = unknown>(file: string): Promise<T | undefined> {

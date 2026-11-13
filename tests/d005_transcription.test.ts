@@ -1,6 +1,7 @@
 /**
  * 24print per-track transcription (R10-R12, R16, R17 of D005 of 24print-ua/24print-hub,
- * 24print-hub#232) with the real FFmpeg and disk; the Whisper ASR service and Odoo are faked.
+ * 24print-hub#232) with the real FFmpeg and disk; the recognition service (`parakeet-asr`,
+ * 24print-hub#267) and Odoo are faked.
  * Requires `ffmpeg` and `ffprobe` with libopus and libvpx on the PATH.
  */
 import { execFile } from "node:child_process";
@@ -24,7 +25,7 @@ jest.setTimeout(180_000);
 const run = promisify(execFile);
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
-const ASR = "https://asr.test:9443/asr";
+const ASR = "https://asr.test:9444/asr";
 const ASR_KEY = "test-asr-key";
 const ODOO = "http://odoo.test/discuss/recording/5";
 const DESTINATION = "http://odoo.test/discuss/recording/upload/token";
@@ -32,7 +33,7 @@ const DESTINATION = "http://odoo.test/discuss/recording/upload/token";
 let root: string;
 let restoreEnv: (() => void) | undefined;
 const originalFetch = global.fetch;
-/** the fake Whisper ASR service: a real HTTP server, as the SFU does not use `fetch` for it */
+/** the fake recognition service: a real HTTP server, as the SFU does not use `fetch` for it */
 let asrServer: http.Server;
 let asrUrl: string;
 let asrHandler: (request: http.IncomingMessage, response: http.ServerResponse) => unknown;
@@ -197,7 +198,7 @@ type AsrRequest = { name: string; url: URL; headers: Record<string, string> };
 type AsrAnswer = (name: string) => Response | Promise<Response>;
 
 /**
- * Fakes the Whisper ASR service and Odoo. Each uploaded archive is kept by recording id.
+ * Fakes the recognition service and Odoo. Each uploaded archive is kept by recording id.
  */
 function fakeServices(answer: AsrAnswer) {
     const asrRequests: AsrRequest[] = [];
@@ -270,15 +271,20 @@ function fakeServices(answer: AsrAnswer) {
     };
 }
 
-/** an answer of the service: the phrases of a chunk, in seconds in the chunk */
+/** an answer of `parakeet-asr`: the phrases of a chunk, in seconds in the chunk */
 function phrases(...segments: [number, number, string][]) {
     return Response.json({
-        text: segments.map(([, , text]) => text).join(""),
-        segments: segments.map(([start, end, text]) => ({ start, end, text, words: [] })),
-        language: "uk",
-        language_confidence: 0.98
+        text: segments.map(([, , text]) => text.trim()).join(" "),
+        segments: segments.map(([start, end, text], id) => ({ id, start, end, text })),
+        language: null
     });
 }
+
+/**
+ * The answer of `parakeet-asr` behind the asr-gateway (`:9444`) to a 12-second chunk of
+ * synthesized Russian and Ukrainian speech, recorded from the test SFU host on 2026-11-13.
+ */
+const RECORDED_PARAKEET_ANSWER = `{"text":"Добрый, давайте обсудим заказ на визитке. Тираж тысяча штук, бумага плотная. Так, я перевірю маки і надішлю рахунок сьогодні ввечері.","segments":[{"id":0,"start":0.0,"end":6.152,"text":"Добрый, давайте обсудим заказ на визитке. Тираж тысяча штук, бумага плотная."},{"id":1,"start":7.384,"end":11.896,"text":"Так, я перевірю маки і надішлю рахунок сьогодні ввечері."}],"language":null}`;
 
 async function setup(env: Record<string, string | undefined> = {}) {
     restoreEnv = withMockEnv({
@@ -544,6 +550,122 @@ describe("R11, R12 of D005: speakers", () => {
     });
 });
 
+describe("R10, R12 of D005: the answers of parakeet-asr", () => {
+    test("R10 of D005: a recorded parakeet-asr answer is parsed into phrases shifted by the chunk", async () => {
+        const { processor } = await setup();
+        const services = fakeServices(
+            () =>
+                new Response(RECORDED_PARAKEET_ANSWER, {
+                    headers: { "content-type": "application/json" }
+                })
+        );
+        const now = Date.now();
+        const name = await writeRecording({
+            name: "parakeet_answer",
+            startedAt: now - 8 * MINUTE,
+            stoppedAt: now,
+            tracks: [
+                {
+                    filename: "1-audio.webm",
+                    sessionId: 1,
+                    offset: 2_000,
+                    label: "Анна",
+                    userId: 7,
+                    parts: [{ seconds: 400, sound: true }]
+                }
+            ]
+        });
+
+        expect(await processor.process(name)).toBe(true);
+
+        expect(services.asrRequests).toHaveLength(2);
+        const { txt, json, manifest } = await delivered(services.archives, name);
+        const first =
+            "Добрый, давайте обсудим заказ на визитке. Тираж тысяча штук, бумага плотная.";
+        const second = "Так, я перевірю маки і надішлю рахунок сьогодні ввечері.";
+        expect(json).toEqual(
+            [0, 5 * MINUTE].flatMap((chunkStart) => [
+                {
+                    start_ms: 2_000 + chunkStart,
+                    end_ms: 2_000 + chunkStart + 6_152,
+                    user_id: 7,
+                    label: "Анна",
+                    text: first
+                },
+                {
+                    start_ms: 2_000 + chunkStart + 7_384,
+                    end_ms: 2_000 + chunkStart + 11_896,
+                    user_id: 7,
+                    label: "Анна",
+                    text: second
+                }
+            ])
+        );
+        expect(txt).toBe(
+            `[00:02] Анна: ${first}\n[00:09] Анна: ${second}\n` +
+                `[05:02] Анна: ${first}\n[05:09] Анна: ${second}\n`
+        );
+        expect(manifest.transcription.tracks[0]).toMatchObject({ chunks: 2, recognized: 2 });
+        expect(manifest.transcription.tracks[0]).not.toHaveProperty("error");
+        expect(manifest.transcription.tracks[0]).not.toHaveProperty("dropped");
+    });
+
+    test("R12 of D005: short phrases without a Cyrillic letter are left out of the transcript and listed in manifest.json", async () => {
+        const { processor } = await setup();
+        const services = fakeServices(() =>
+            phrases(
+                [1, 1.5, " Yeah"],
+                [2, 2.5, "Um"],
+                [3, 4, "Diventi, d."],
+                [5, 5.5, "Так."],
+                [6, 8, "Как это, Day Limit?"]
+            )
+        );
+        const now = Date.now();
+        const name = await writeRecording({
+            name: "noise",
+            startedAt: now - 30_000,
+            stoppedAt: now,
+            tracks: [
+                {
+                    filename: "1-audio.webm",
+                    sessionId: 1,
+                    offset: 1_000,
+                    label: "Анна",
+                    userId: 7,
+                    parts: [{ seconds: 20, sound: true }]
+                }
+            ]
+        });
+
+        expect(await processor.process(name)).toBe(true);
+
+        expect(services.asrRequests).toHaveLength(1);
+        const { txt, json, manifest } = await delivered(services.archives, name);
+        expect(txt).toBe("[00:06] Анна: Так.\n[00:07] Анна: Как это, Day Limit?\n");
+        expect(json.map((segment: { text: string }) => segment.text)).toEqual([
+            "Так.",
+            "Как это, Day Limit?"
+        ]);
+        expect(manifest.transcription.tracks).toEqual([
+            {
+                file: "audio/1-audio.webm",
+                session_id: 1,
+                user_id: 7,
+                label: "Анна",
+                chunks: 1,
+                recognized: 1,
+                silent: 0,
+                dropped: [
+                    { start_ms: 2_000, text: "Yeah" },
+                    { start_ms: 3_000, text: "Um" },
+                    { start_ms: 4_000, text: "Diventi, d." }
+                ]
+            }
+        ]);
+    });
+});
+
 describe("R16, R17 of D005: failures", () => {
     test("R16 of D005: the service answers 400 on one track; the other tracks are in the transcript, the failure in manifest.json", async () => {
         const { processor } = await setup();
@@ -680,7 +802,7 @@ describe("R16, R17 of D005: failures", () => {
             if (name === "1-audio.webm.chunk_0001.ogg" && failures.length) {
                 return new Response("busy", { status: failures.shift() });
             }
-            return phrases([1, 2, ` ${name}`]);
+            return phrases([1, 2, ` фраза ${name}`]);
         });
         const stoppedAt = Date.now();
         let now = stoppedAt;
@@ -752,8 +874,8 @@ describe("R16, R17 of D005: failures", () => {
         ]);
         const { json } = await delivered(services.archives, recordingA);
         expect(json.map((segment: { text: string }) => segment.text)).toEqual([
-            "1-audio.webm.chunk_0000.ogg",
-            "1-audio.webm.chunk_0001.ogg"
+            "фраза 1-audio.webm.chunk_0000.ogg",
+            "фраза 1-audio.webm.chunk_0001.ogg"
         ]);
         expect(json[1].start_ms).toBe(5 * MINUTE + 1_000);
     });
@@ -804,7 +926,7 @@ describe("R10 of D005: a chunk takes minutes to recognize", () => {
     function slowService(delayMs: number) {
         return fakeServices(async (name) => {
             await new Promise((resolve) => setTimeout(resolve, delayMs));
-            return phrases([1, 2, ` ${name}`]);
+            return phrases([1, 2, ` фраза ${name}`]);
         });
     }
 
@@ -827,11 +949,26 @@ describe("R10 of D005: a chunk takes minutes to recognize", () => {
             const name = await writeShortRecording("slow_answer");
             expect(await processor.process(name)).toBe(true);
             const { txt, manifest } = await delivered(services.archives, name);
-            expect(txt).toBe("[00:01] Анна: 1-audio.webm.chunk_0000.ogg\n");
+            expect(txt).toBe("[00:01] Анна: фраза 1-audio.webm.chunk_0000.ogg\n");
             expect(manifest.transcription.tracks[0]).not.toHaveProperty("error");
         } finally {
             restoreFetch();
         }
+    });
+
+    test("R10, R17 of D005: a request waits 5 minutes by default, under the gateway's 600 s", async () => {
+        const { config, processor } = await setup();
+        const { requestTimeout } = config.recording.transcription;
+        expect(requestTimeout).toBe(5 * MINUTE);
+        expect(requestTimeout).toBeLessThan(600_000);
+        slowService(0);
+        const timeouts = jest.spyOn(AbortSignal, "timeout");
+        const name = await writeShortRecording("default_timeout");
+
+        expect(await processor.process(name)).toBe(true);
+
+        // the request of the chunk, the deadline 18 h away
+        expect(timeouts.mock.calls.map(([ms]) => ms)).toContain(requestTimeout);
     });
 
     test("R10, R17 of D005: the request timeout alone ends a request, and it is retried", async () => {

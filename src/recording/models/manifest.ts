@@ -42,6 +42,8 @@ export type TranscriptionTrackManifest = {
     silent: number;
     /** why the track, or some of its chunks, is missing from the transcripts (R16 of D005) */
     error?: string;
+    /** short phrases without a Cyrillic letter, left out of the transcripts (R12 of D005) */
+    dropped?: { start_ms: number; text: string }[];
 };
 
 /**
