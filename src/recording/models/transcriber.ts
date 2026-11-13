@@ -1,3 +1,5 @@
+import http from "node:http";
+import https from "node:https";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -308,12 +310,7 @@ async function recognize(file: string, timeoutMs: number): Promise<Segment[]> {
         // track and chunk, e.g. 7-audio.webm.chunk_0002.ogg
         `${path.basename(path.dirname(file))}.${path.basename(file)}`
     );
-    const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey! },
-        body: form,
-        signal: AbortSignal.timeout(timeoutMs)
-    });
+    const response = await post(endpoint, { "X-API-Key": apiKey! }, form, timeoutMs);
     if (!response.ok) {
         const body = (await response.text().catch(() => "")).slice(0, MAX_ERROR_BODY);
         throw new HttpError(
@@ -332,6 +329,61 @@ async function recognize(file: string, timeoutMs: number): Promise<Segment[]> {
         }
         const start = segment.start!;
         return [{ start, end: Number.isFinite(segment.end) ? segment.end! : start, text }];
+    });
+}
+
+/**
+ * POSTs `form` through `node:http(s)`: `fetch` (undici) gives up after 300 s without the
+ * response headers, and the service answers a chunk only once it is recognized, which
+ * takes ~4.5 min on an idle host (24print-ua/24print-hub#232). Here `timeoutMs` is the
+ * only limit.
+ *
+ * @throws {TypeError} on a network failure, as `fetch` does
+ * @throws {DOMException} `TimeoutError` after `timeoutMs`
+ */
+export async function post(
+    url: URL,
+    headers: Record<string, string>,
+    form: FormData,
+    timeoutMs: number
+): Promise<Response> {
+    const encoded = new Response(form);
+    const body = Buffer.from(await encoded.arrayBuffer());
+    const signal = AbortSignal.timeout(timeoutMs);
+    return new Promise<Response>((resolve, reject) => {
+        const request = (url.protocol === "https:" ? https : http).request(
+            url,
+            {
+                method: "POST",
+                headers: {
+                    ...headers,
+                    "Content-Type": encoded.headers.get("content-type")!,
+                    "Content-Length": body.length
+                },
+                signal
+            },
+            (response) => {
+                const chunks: Buffer[] = [];
+                response.on("data", (chunk: Buffer) => chunks.push(chunk));
+                response.on("error", fail);
+                response.on("end", () =>
+                    resolve(new Response(Buffer.concat(chunks), { status: response.statusCode }))
+                );
+            }
+        );
+        function fail(error: Error) {
+            reject(
+                signal.aborted
+                    ? signal.reason
+                    : new TypeError(`transcription request failed: ${error.message}`, {
+                          cause: error
+                      })
+            );
+        }
+        request.on("error", fail);
+        // the connection stays silent while the chunk is recognized
+        request.on("socket", (socket) => socket.setKeepAlive(true, 60_000));
+        request.end(body);
     });
 }
 

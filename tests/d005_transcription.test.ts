@@ -4,6 +4,8 @@
  * Requires `ffmpeg` and `ffprobe` with libopus and libvpx on the PATH.
  */
 import { execFile } from "node:child_process";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -30,12 +32,21 @@ const DESTINATION = "http://odoo.test/discuss/recording/upload/token";
 let root: string;
 let restoreEnv: (() => void) | undefined;
 const originalFetch = global.fetch;
+/** the fake Whisper ASR service: a real HTTP server, as the SFU does not use `fetch` for it */
+let asrServer: http.Server;
+let asrUrl: string;
+let asrHandler: (request: http.IncomingMessage, response: http.ServerResponse) => unknown;
 
 beforeAll(async () => {
     root = await mkdtemp(path.join(os.tmpdir(), "sfu-d005-asr-"));
+    asrServer = http.createServer((request, response) => asrHandler(request, response));
+    await new Promise<void>((resolve) => asrServer.listen(0, "127.0.0.1", resolve));
+    asrUrl = `http://127.0.0.1:${(asrServer.address() as AddressInfo).port}/asr`;
 });
 
 afterAll(async () => {
+    asrServer.closeAllConnections();
+    await new Promise((resolve) => asrServer.close(resolve));
     await rm(root, { recursive: true, force: true });
 });
 
@@ -195,20 +206,37 @@ function fakeServices(answer: AsrAnswer) {
     let inFlight = 0;
     let maxInFlight = 0;
     let pendingRecording: string | undefined;
+    asrHandler = async (request, response) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) {
+            chunks.push(chunk);
+        }
+        const form = await new Request("http://asr", {
+            method: "POST",
+            headers: { "content-type": request.headers["content-type"]! },
+            body: Buffer.concat(chunks)
+        }).formData();
+        const name = (form.get("audio_file") as File).name;
+        const url = new URL(request.url!, asrUrl);
+        asrRequests.push({ name, url, headers: request.headers as Record<string, string> });
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            const answered = await answer(name);
+            response.writeHead(answered.status, { "content-type": "application/json" });
+            response.end(Buffer.from(await answered.arrayBuffer()));
+        } catch {
+            // the service is unreachable
+            request.socket.destroy();
+        } finally {
+            inFlight -= 1;
+        }
+    };
     global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(input.toString());
-        if (url.toString().startsWith(ASR)) {
-            const form = init!.body as FormData;
-            const name = (form.get("audio_file") as File).name;
-            asrRequests.push({ name, url, headers: init!.headers as Record<string, string> });
-            inFlight += 1;
-            maxInFlight = Math.max(maxInFlight, inFlight);
-            try {
-                await new Promise((resolve) => setTimeout(resolve, 5));
-                return await answer(name);
-            } finally {
-                inFlight -= 1;
-            }
+        if (url.toString().startsWith(asrUrl)) {
+            return originalFetch(input, init);
         }
         if (url.pathname.endsWith("/routing")) {
             pendingRecording = url.searchParams.get("recording_id")!;
@@ -256,7 +284,7 @@ async function setup(env: Record<string, string | undefined> = {}) {
     restoreEnv = withMockEnv({
         DATA_PATH: await mkdtemp(path.join(root, "data-")),
         RECORDING_ARCHIVE: "1",
-        RECORDING_TRANSCRIBE_URL: ASR,
+        RECORDING_TRANSCRIBE_URL: asrUrl,
         RECORDING_TRANSCRIBE_API_KEY: ASR_KEY,
         RECORDING_SCREEN_FRAMES: "1",
         RECORDING_COMPILE_VIDEO: "false",
@@ -355,7 +383,7 @@ describe("R10 of D005: chunks", () => {
         ]);
         expect(services.maxInFlight()).toBe(1);
         for (const { url, headers } of services.asrRequests) {
-            expect(headers["X-API-Key"]).toBe(ASR_KEY);
+            expect(headers["x-api-key"]).toBe(ASR_KEY);
             expect(url.searchParams.get("output")).toBe("json");
             // the language is detected by the service
             expect(url.searchParams.has("language")).toBe(false);
@@ -634,7 +662,9 @@ describe("R16, R17 of D005: failures", () => {
         expect(manifest.mix).toEqual({ file: "mix.ogg" });
         expect(manifest.frames.count).toBeGreaterThan(0);
         for (const track of manifest.transcription.tracks) {
-            expect(track.error).toMatch(/^not recognized within 18 h .*fetch failed/);
+            expect(track.error).toMatch(
+                /^not recognized within 18 h .*TypeError: transcription request failed/
+            );
         }
         expect(
             manifest.transcription.tracks.map((track: { label: string }) => track.label)
@@ -726,5 +756,97 @@ describe("R16, R17 of D005: failures", () => {
             "1-audio.webm.chunk_0001.ogg"
         ]);
         expect(json[1].start_ms).toBe(5 * MINUTE + 1_000);
+    });
+});
+
+/**
+ * Caps how long Node's `fetch` (undici) waits for response headers, 300 s by default, so a
+ * test can show the cap without waiting 5 minutes.
+ *
+ * @returns restores the default
+ */
+function capFetchHeadersTimeout(ms: number): () => void {
+    // the global of `fetch`, outside the Jest sandbox
+    const global = (originalFetch.constructor as FunctionConstructor)(
+        "return globalThis"
+    )() as Record<symbol, object | undefined>;
+    const key = [2, 1]
+        .map((version) => Symbol.for(`undici.globalDispatcher.${version}`))
+        .find((symbol) => global[symbol]?.constructor.name === "Agent")!;
+    const original = global[key]!;
+    const Agent = original.constructor as new (options: { headersTimeout: number }) => object;
+    global[key] = new Agent({ headersTimeout: ms });
+    return () => {
+        global[key] = original;
+    };
+}
+
+describe("R10 of D005: a chunk takes minutes to recognize", () => {
+    /** a 20-second track of Анна, stopped now */
+    function writeShortRecording(name: string) {
+        const now = Date.now();
+        return writeRecording({
+            name,
+            startedAt: now - 30_000,
+            stoppedAt: now,
+            tracks: [
+                {
+                    filename: "1-audio.webm",
+                    sessionId: 1,
+                    offset: 0,
+                    label: "Анна",
+                    parts: [{ seconds: 20, sound: true }]
+                }
+            ]
+        });
+    }
+
+    function slowService(delayMs: number) {
+        return fakeServices(async (name) => {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            return phrases([1, 2, ` ${name}`]);
+        });
+    }
+
+    test("R10 of D005: an answer that comes after fetch stops waiting for headers is received (24print-hub#232)", async () => {
+        const { processor } = await setup();
+        const services = slowService(2_500);
+        const restoreFetch = capFetchHeadersTimeout(1_000);
+        try {
+            // the cap applies to fetch: it fails as on the test SFU, after 300 s there
+            const form = new FormData();
+            form.append("audio_file", new Blob(["x"]), "probe.chunk_0000.ogg");
+            const failure = await originalFetch(asrUrl, { method: "POST", body: form }).catch(
+                (error: Error) => error
+            );
+            expect(failure).toMatchObject({
+                name: "TypeError",
+                cause: { code: "UND_ERR_HEADERS_TIMEOUT" }
+            });
+
+            const name = await writeShortRecording("slow_answer");
+            expect(await processor.process(name)).toBe(true);
+            const { txt, manifest } = await delivered(services.archives, name);
+            expect(txt).toBe("[00:01] Анна: 1-audio.webm.chunk_0000.ogg\n");
+            expect(manifest.transcription.tracks[0]).not.toHaveProperty("error");
+        } finally {
+            restoreFetch();
+        }
+    });
+
+    test("R10, R17 of D005: the request timeout alone ends a request, and it is retried", async () => {
+        const { config, processor } = await setup();
+        slowService(2_500);
+        (config.recording.transcription as { requestTimeout: number }).requestTimeout = 1_000;
+        const name = await writeShortRecording("request_timeout");
+        const startedAt = performance.now();
+
+        expect(await processor.process(name)).toBe(false);
+
+        expect(performance.now() - startedAt).toBeLessThan(2_500);
+        const state = JSON.parse(
+            await readFile(path.join(config.dir.recordings, name, "transcription.json"), "utf-8")
+        );
+        expect(state).toMatchObject({ attempts: 1, error: expect.stringMatching(/^TimeoutError/) });
     });
 });
