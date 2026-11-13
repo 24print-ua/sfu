@@ -101,6 +101,8 @@ export class Channel extends EventEmitter {
     private readonly _worker?: RtcWorker;
     /** Timeout for auto-closing empty channels */
     private _closeTimeout?: NodeJS.Timeout;
+    /** the recording stops when it runs out with fewer than 2 sessions */
+    private _aloneTimeout?: NodeJS.Timeout;
     private _closePromise?: Promise<void>;
 
     /**
@@ -292,6 +294,8 @@ export class Channel extends EventEmitter {
         this.sessions.set(session.id, session);
         if (this.sessions.size > 1) {
             this.setCloseTimeout(false);
+            clearTimeout(this._aloneTimeout);
+            this._aloneTimeout = undefined;
         }
         session.once("close", this._onSessionClose);
         /**
@@ -339,6 +343,7 @@ export class Channel extends EventEmitter {
             session.close({ code: SESSION_CLOSE_CODE.CHANNEL_CLOSED });
         }
         clearTimeout(this._closeTimeout);
+        clearTimeout(this._aloneTimeout);
         this.sessions.clear();
         /**
          * @event Channel#close
@@ -375,6 +380,26 @@ export class Channel extends EventEmitter {
     }
 
     /**
+     * Stops the recording of a channel left with one session, after `RECORDING_ALONE_GRACE_S`
+     * if set: a participant who reconnects by then keeps it going (24print-ua/24print-hub#233).
+     */
+    private _stopRecordingWhenAlone(): void {
+        if (!config.recording.aloneGrace) {
+            void this.recorder?.stop({ stopCode: STOP_CODE.CHANNEL_CLOSED });
+            return;
+        }
+        if (this._aloneTimeout) {
+            return;
+        }
+        this._aloneTimeout = setTimeout(() => {
+            this._aloneTimeout = undefined;
+            if (this.sessions.size < 2) {
+                void this.recorder?.stop({ stopCode: STOP_CODE.CHANNEL_CLOSED });
+            }
+        }, config.recording.aloneGrace);
+    }
+
+    /**
      * @param event - Close event with session ID
      * @fires Channel#sessionLeave
      */
@@ -391,7 +416,7 @@ export class Channel extends EventEmitter {
              * a single person should not keep a channel alive forever.
              */
             this.setCloseTimeout(true);
-            this.recorder?.stop({ stopCode: STOP_CODE.CHANNEL_CLOSED });
+            this._stopRecordingWhenAlone();
         } else if (this.sessions.size === 0) {
             void this.close();
         }

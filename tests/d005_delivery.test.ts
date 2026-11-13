@@ -47,6 +47,30 @@ function checkContractToken(authorization: string, key: Buffer, recordingId: str
 }
 
 describe("D005 delivery settings", () => {
+    test("RECORDING_ALONE_GRACE_S: 0 by default, a non-negative number of seconds", async () => {
+        for (const [value, grace] of [
+            [undefined, 0],
+            ["15", 15_000],
+            ["0.5", 500]
+        ] as const) {
+            const restore = withMockEnv({ RECORDING_ALONE_GRACE_S: value });
+            try {
+                const config = await import("#src/config.ts");
+                expect(config.recording.aloneGrace).toBe(grace);
+            } finally {
+                restore();
+            }
+        }
+        for (const value of ["-1", "abc"]) {
+            const restore = withMockEnv({ RECORDING_ALONE_GRACE_S: value });
+            try {
+                await expect(import("#src/config.ts")).rejects.toThrow(/RECORDING_ALONE_GRACE_S/);
+            } finally {
+                restore();
+            }
+        }
+    });
+
     test("defaults keep the upstream behaviour, 1 turns each setting on", async () => {
         const names = ["RECORDING_STATE_CALLBACK", "RECORDING_DELIVERY_RETRY", "RECORDING_ARCHIVE"];
         for (const value of [undefined, "1"]) {
@@ -163,6 +187,42 @@ describe("Odoo state calls", () => {
             }
         } finally {
             setTimeoutSpy.mockRestore();
+            await restore();
+        }
+    });
+
+    test("R4 of D005: with RECORDING_ALONE_GRACE_S, a participant back in time keeps the recording; alone after it, it stops (24print-hub#233)", async () => {
+        const { restore, odoo, network, channel, channelUUID, user7 } = await stateSetup({
+            RECORDING_ALONE_GRACE_S: "0.3"
+        });
+        try {
+            const recorder = channel.recorder!;
+            expect(await user7.sfuClient.setRecording({ audio: true })).toBe(true);
+            await waitFor(() => odoo.received.length === 1);
+
+            // user 8 reconnects at once, as session 116 did on the test SFU
+            channel.sessions.get(2)!.close();
+            await waitFor(() => channel.sessions.size === 1);
+            expect(recorder.isRecording).toBe(true);
+            await network.connect(channelUUID, 2, { userId: 8 });
+            await waitFor(() => channel.sessions.size === 2);
+            await new Promise((resolve) => setTimeout(resolve, 600));
+            expect(recorder.isRecording).toBe(true);
+            expect(odoo.received).toHaveLength(1);
+
+            // user 8 leaves for good
+            const leftAt = performance.now();
+            channel.sessions.get(2)!.close();
+            await waitFor(() => channel.sessions.size === 1);
+            expect(recorder.isRecording).toBe(true);
+            await waitFor(() => odoo.received.length === 2);
+            expect(performance.now() - leftAt).toBeGreaterThanOrEqual(290);
+            expect(recorder.isRecording).toBe(false);
+            expect(odoo.received.map(({ body }) => [body.active, body.reason])).toEqual([
+                [true, "user"],
+                [false, "alone"]
+            ]);
+        } finally {
             await restore();
         }
     });

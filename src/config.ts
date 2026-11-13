@@ -205,6 +205,15 @@ export const RECORDING_MAX_DURATION_MIN: number = process.env.RECORDING_MAX_DURA
     : 60;
 
 /**
+ * Seconds a recording goes on when fewer than 2 participants are left, defaults to 0 (stops
+ * at once). A participant who reconnects within them keeps the recording going
+ * (24print-ua/24print-hub#233). e.g: RECORDING_ALONE_GRACE_S=15
+ */
+export const RECORDING_ALONE_GRACE_S: number = process.env.RECORDING_ALONE_GRACE_S?.trim()
+    ? Number(process.env.RECORDING_ALONE_GRACE_S)
+    : 0;
+
+/**
  * Whether cameras are recorded, defaults to true. Screen sharing is recorded either way.
  */
 export const RECORDING_CAMERAS: boolean = envFlagOr(process.env.RECORDING_CAMERAS, true);
@@ -303,6 +312,9 @@ if (
 if (!(RECORDING_MAX_DURATION_MIN > 0 && Number.isFinite(RECORDING_MAX_DURATION_MIN))) {
     throw new Error("RECORDING_MAX_DURATION_MIN must be a positive number of minutes");
 }
+if (!(RECORDING_ALONE_GRACE_S >= 0 && Number.isFinite(RECORDING_ALONE_GRACE_S))) {
+    throw new Error("RECORDING_ALONE_GRACE_S must be a non-negative number of seconds");
+}
 if (RECORDING_RAW_VIDEO_CONTAINER !== undefined && RECORDING_RAW_VIDEO_CONTAINER !== "mkv") {
     throw new Error("RECORDING_RAW_VIDEO_CONTAINER must be mkv or unset");
 }
@@ -350,6 +362,7 @@ export const recording = {
     metadataFileName: "metadata.bin",
     minDuration: 5 /* sec */ * 1000, // TODO should probably be raised in prod
     maxDuration: RECORDING_MAX_DURATION_MIN * 60 * 1000,
+    aloneGrace: RECORDING_ALONE_GRACE_S * 1000,
     fileTTL: 24 /* hours */ * 60 * 60 * 1000,
     processingCooldown: 5 /* sec */ * 1000,
     video: {
