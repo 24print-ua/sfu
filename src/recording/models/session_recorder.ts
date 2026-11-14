@@ -179,8 +179,9 @@ export class SessionRecorder {
                         type: data.type,
                         sessionId: this._session.id,
                         eof,
-                        // the speaker of the track transcript (R11 of D005)
-                        ...(config.recording.transcription.enabled
+                        // the speaker of the track transcript and archived track (R11, R13 of D005)
+                        ...(config.recording.transcription.enabled ||
+                        config.recording.archive.tracks
                             ? { label: this._session.label, userId: this._session.userId }
                             : {})
                     },

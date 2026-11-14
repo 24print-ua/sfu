@@ -26,6 +26,15 @@ export type TrackManifest = {
     session_id: SessionId;
     /** why the track is missing from the mix */
     error?: string;
+    /** the raw file in `recording.zip`, `tracks/<offset ms>-<label>.<ext>` (R13 of D005) */
+    name?: string;
+    /** speaker of the session token */
+    label?: string;
+    user_id?: number;
+    /** offset of the file from the recording start, negative when it started before */
+    start_ms?: number;
+    /** size of the raw file */
+    bytes?: number;
 };
 
 export type TranscriptionTrackManifest = {
@@ -56,6 +65,8 @@ export type Manifest = {
     frames?: FramesManifest;
     /** audio tracks of the participants (R16 of D005) */
     tracks?: TrackManifest[];
+    /** why the raw tracks are not in `recording.zip` (R13, R16 of D005) */
+    tracks_omitted?: "archive limit";
     /** the mixed audio, `error` when it could not be compiled */
     mix?: { file?: string; error?: string };
     /** the compiled video, `error` when it could not be compiled */

@@ -207,6 +207,21 @@ rest is still delivered. Routing and completion carry `recording_id` (the folder
 name) first in the query, and every JWT to Odoo, `state` included, carries
 `aud: "24print-call-recording"`, `recording_id` and `exp - iat = 600` (24print-ua/24print-hub#227).
 
+With `RECORDING_ARCHIVE` and `RECORDING_ARCHIVE_TRACKS=1` every raw audio file of a
+participant (a reconnected participant has one per connection) also goes into the
+archive byte for byte, unreadable ones included, as
+`tracks/<offset ms, 8 digits>-<label>.<ext>`, e.g. `tracks/00083456-Попов Костянтин.webm`.
+The offset is the file's first activation minus the recording start (`00000000` when
+negative); the label keeps letters of any alphabet, digits, space, `-`, `_` and `.`,
+anything else becomes `_`, at most 64 characters, the session id without a label, and a
+repeated name gets `-2`, `-3`. The session token's `label` and `user_id` are kept in the
+`file_state_change` metadata, and `manifest.json` `tracks[]` gets `name`, `label`,
+`user_id`, `start_ms` (exact offset, may be negative) and `bytes`: a phrase time in a
+track plus `start_ms` is its time in the recording. With `RECORDING_ARCHIVE_MAX_MB`, when
+the archive with the tracks would be larger, the tracks are left out, `tracks[].name`
+is dropped and `tracks_omitted: "archive limit"` is set; the rest still goes
+(24print-ua/24print-hub#271).
+
 With `RECORDING_ARCHIVE` and `RECORDING_TRANSCRIBE_URL` (with `RECORDING_TRANSCRIBE_API_KEY`) each audio track
 is transcribed before the archive is built, one request at a time. The session token's
 `label` and `user_id` are kept in the `file_state_change` metadata of its tracks. A track

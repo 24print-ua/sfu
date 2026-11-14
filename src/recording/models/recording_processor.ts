@@ -55,6 +55,19 @@ async function exists(file: string) {
     }
 }
 
+/**
+ * The speaker part of an archived track name: letters of any alphabet, digits, space,
+ * `-`, `_` and `.` are kept, anything else becomes `_`; at most 64 characters; the
+ * session id without a label.
+ */
+function trackLabel(track: TrackManifest): string {
+    const label = track.label
+        ?.normalize("NFC")
+        .replace(/[^\p{L}\p{M}\p{N} ._-]/gu, "_")
+        .trim();
+    return label ? [...label].slice(0, 64).join("") : String(track.session_id);
+}
+
 export class RecordingProcessor {
     private readonly _uploader: MediaUploader;
     private readonly _finalizeRecordingFolder: (
@@ -230,9 +243,17 @@ export class RecordingProcessor {
                     compiler.getAudio()
                 ))
             );
-            await updateManifest(recordingDirectory, {
-                tracks: this._audioTracks(recordingDirectory, metadata, compiler)
-            });
+            const tracks = this._audioTracks(recordingDirectory, metadata, compiler);
+            await updateManifest(
+                recordingDirectory,
+                config.recording.archive.tracks
+                    ? {
+                          tracks: await this._archivedTracks(recordingDirectory, tracks),
+                          // decided again by this attempt
+                          tracks_omitted: undefined
+                      }
+                    : { tracks }
+            );
         }
         if (metadata.video && config.RECORDING_SCREEN_FRAMES) {
             await this._compileScreenFrames(recordingDirectory, metadata);
@@ -262,6 +283,9 @@ export class RecordingProcessor {
         }
         if (entries.length === 0) {
             return false;
+        }
+        if (config.recording.archive.tracks && manifest.tracks) {
+            entries.push(...(await this._trackEntries(recordingDirectory, entries, manifest)));
         }
         entries.push({
             name: MANIFEST_FILENAME,
@@ -330,6 +354,77 @@ export class RecordingProcessor {
     }
 
     /**
+     * The raw audio files of the participants as archive entries (R13 of D005), unless the
+     * archive would then exceed `RECORDING_ARCHIVE_MAX_MB`: the tracks are left out and
+     * `tracks_omitted` is noted, the rest still goes (R16 of D005).
+     */
+    private async _trackEntries(
+        recordingDirectory: string,
+        entries: ZipEntry[],
+        manifest: Manifest
+    ): Promise<ZipEntry[]> {
+        const tracks = manifest.tracks!.filter((track) => track.name);
+        const trackEntries = tracks.map(({ name, file }) => ({
+            name: name!,
+            path: path.join(recordingDirectory, file)
+        }));
+        const { maxBytes } = config.recording.archive;
+        if (maxBytes !== undefined) {
+            let size = (await fs.stat(path.join(recordingDirectory, MANIFEST_FILENAME))).size;
+            for (const entry of entries) {
+                size += (await fs.stat(entry.path)).size;
+            }
+            for (const track of tracks) {
+                size += track.bytes!;
+            }
+            if (size > maxBytes) {
+                logger.warn(
+                    `Tracks of ${recordingDirectory} left out: ${size} bytes over ${maxBytes}`
+                );
+                await updateManifest(recordingDirectory, {
+                    tracks: manifest.tracks!.map(({ name: _name, ...track }) => track),
+                    tracks_omitted: "archive limit"
+                });
+                return [];
+            }
+        }
+        return trackEntries;
+    }
+
+    /**
+     * Adds to the tracks their name in the archive, speaker, offset and size (R13 of D005):
+     * `tracks/<offset ms, 8 digits>-<label or session id>.<ext>`, sorted by offset.
+     */
+    private async _archivedTracks(
+        recordingDirectory: string,
+        tracks: TrackManifest[]
+    ): Promise<TrackManifest[]> {
+        const taken = new Set<string>();
+        const result: TrackManifest[] = [];
+        for (const track of [...tracks].sort((a, b) => a.start_ms! - b.start_ms!)) {
+            let bytes: number;
+            try {
+                bytes = (await fs.stat(path.join(recordingDirectory, track.file))).size;
+            } catch {
+                result.push({ ...track, error: track.error ?? "missing" });
+                continue;
+            }
+            const offset = String(Math.max(0, track.start_ms!)).padStart(8, "0");
+            const ext = path.extname(track.file);
+            const stem = `${config.recording.archive.tracksDirectory}/${offset}-${trackLabel(
+                track
+            )}`;
+            let name = `${stem}${ext}`;
+            for (let suffix = 2; taken.has(name); suffix++) {
+                name = `${stem}-${suffix}${ext}`;
+            }
+            taken.add(name);
+            result.push({ ...track, name, bytes });
+        }
+        return result;
+    }
+
+    /**
      * The audio tracks of the participants, with the unreadable ones marked.
      */
     private _audioTracks(
@@ -353,7 +448,14 @@ export class RecordingProcessor {
             tracks.set(info.filename, {
                 file,
                 session_id: info.sessionId,
-                ...(unreadable ? { error: "unreadable" } : {})
+                ...(unreadable ? { error: "unreadable" } : {}),
+                ...(config.recording.archive.tracks
+                    ? {
+                          label: info.label?.trim() || undefined,
+                          user_id: info.userId,
+                          start_ms: timestamp - metadata.startedAt
+                      }
+                    : {})
             });
         }
         return [...tracks.values()];

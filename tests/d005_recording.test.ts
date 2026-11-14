@@ -224,6 +224,44 @@ describe("R11 of D005: speaker of a track", () => {
     );
 });
 
+describe("R13 of D005: speaker of an archived track", () => {
+    test("R13 of D005: with RECORDING_ARCHIVE_TRACKS=1 and no RECORDING_TRANSCRIBE_URL, file_state_change of an audio track carries label and user_id", async () => {
+        keepWritersAlive();
+        const { restore, network, getChannel } = await recordingSetup({
+            RECORDING: "true",
+            RECORDING_ARCHIVE: "1",
+            RECORDING_ARCHIVE_TRACKS: "1",
+            RECORDING_TRANSCRIBE_URL: undefined,
+            RECORDING_TRANSCRIBE_API_KEY: undefined
+        });
+        try {
+            const channelUUID = await network.getChannelUUID();
+            const user1 = await network.connect(channelUUID, 1, { userId: 7 });
+            await network.connect(channelUUID, 2);
+            const channel = getChannel(channelUUID)!;
+            channel.sessions.get(1)!.label = "Анна Коваль";
+            const mark = jest.spyOn(channel.recorder!, "mark");
+            expect(await user1.sfuClient.setRecording({ audio: true })).toBe(true);
+            await waitFor(() => user1.sfuClient.recordingState.audio);
+            await user1.sfuClient.updateUpload(
+                STREAM_TYPE.AUDIO,
+                new FakeMediaStreamTrack({ kind: "audio" })
+            );
+            await waitFor(() => channel.sessions.get(1)!.producers.audio);
+            await channel.recorder!.stop();
+            const marks = mark.mock.calls
+                .map(([, info]) => info)
+                .filter((info) => info.type === STREAM_TYPE.AUDIO && info.sessionId === 1);
+            expect(marks.length).toBeGreaterThan(0);
+            for (const info of marks) {
+                expect(info).toMatchObject({ label: "Анна Коваль", userId: 7 });
+            }
+        } finally {
+            await restore();
+        }
+    });
+});
+
 describe("R7 of D005: recorded streams", () => {
     test("R7 of D005: with RECORDING_CAMERAS=false a camera is not recorded, the screen is", async () => {
         keepWritersAlive();

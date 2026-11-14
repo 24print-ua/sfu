@@ -268,6 +268,24 @@ export const RECORDING_DELIVERY_RETRY: boolean = envFlag(process.env.RECORDING_D
 export const RECORDING_ARCHIVE: boolean = envFlag(process.env.RECORDING_ARCHIVE);
 
 /**
+ * If set, the raw audio file of every participant goes into `recording.zip` byte for byte
+ * as `tracks/<offset ms, 8 digits>-<label>.<ext>`, listed in `manifest.json` `tracks` with
+ * `name`, `label`, `user_id`, `start_ms` and `bytes` (24print-ua/24print-hub#271).
+ * Ignored without `RECORDING_ARCHIVE`.
+ */
+export const RECORDING_ARCHIVE_TRACKS: boolean = envFlag(process.env.RECORDING_ARCHIVE_TRACKS);
+
+/**
+ * Size limit of `recording.zip` in decimal megabytes, unset for none. When the archive with
+ * the tracks of `RECORDING_ARCHIVE_TRACKS` would be larger, the tracks are left out
+ * (`tracks_omitted` in `manifest.json`) and the rest goes. e.g: RECORDING_ARCHIVE_MAX_MB=2000
+ */
+export const RECORDING_ARCHIVE_MAX_MB: number | undefined =
+    process.env.RECORDING_ARCHIVE_MAX_MB?.trim()
+        ? Number(process.env.RECORDING_ARCHIVE_MAX_MB)
+        : undefined;
+
+/**
  * `/asr` endpoint of a speech recognition service with the Whisper ASR webservice API,
  * e.g. `parakeet-asr` (Parakeet TDT 0.6B v3) behind the 24print asr-gateway. If set, each
  * audio track is transcribed in 5-minute chunks, one request at a time, into
@@ -321,6 +339,12 @@ if (RECORDING_RAW_VIDEO_CONTAINER !== undefined && RECORDING_RAW_VIDEO_CONTAINER
 }
 if (RECORDING_AUDIO_NORMALIZE !== undefined && !["0", "1"].includes(RECORDING_AUDIO_NORMALIZE)) {
     throw new Error("RECORDING_AUDIO_NORMALIZE must be 0, 1 or unset");
+}
+if (
+    RECORDING_ARCHIVE_MAX_MB !== undefined &&
+    !(RECORDING_ARCHIVE_MAX_MB > 0 && Number.isFinite(RECORDING_ARCHIVE_MAX_MB))
+) {
+    throw new Error("RECORDING_ARCHIVE_MAX_MB must be a positive number of megabytes");
 }
 if (Boolean(RECORDING_TRANSCRIBE_URL) !== Boolean(RECORDING_TRANSCRIBE_API_KEY)) {
     throw new Error("RECORDING_TRANSCRIBE_URL and RECORDING_TRANSCRIBE_API_KEY go together");
@@ -390,7 +414,14 @@ export const recording = {
     /** single delivery archive, see `RECORDING_ARCHIVE` */
     archive: {
         name: "recording.zip",
-        mimeType: "application/zip"
+        mimeType: "application/zip",
+        /** raw audio of the participants in the archive, see `RECORDING_ARCHIVE_TRACKS` */
+        tracks: RECORDING_ARCHIVE_TRACKS && RECORDING_ARCHIVE,
+        tracksDirectory: "tracks",
+        maxBytes:
+            RECORDING_ARCHIVE_MAX_MB === undefined
+                ? undefined
+                : Math.floor(RECORDING_ARCHIVE_MAX_MB * 1_000_000)
     },
     /** per-track transcription, see `RECORDING_TRANSCRIBE_URL` */
     transcription: {
